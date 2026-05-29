@@ -128,6 +128,9 @@ enum Commands {
         /// Save type: f=FLASH, e=EEPROM, g=?, h=?
         #[arg(long, default_value = "f")]
         save_type: char,
+        /// Output file path (writes binary; omit to print hex to stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// USB bus reset (port reset)
     Reset,
@@ -724,7 +727,7 @@ fn cmd_reset_cart() -> Result<()> {
     Ok(())
 }
 
-fn cmd_save_read(byte_addr: u32, count: u32, save_type: char) -> Result<()> {
+fn cmd_save_read(byte_addr: u32, count: u32, save_type: char, output: Option<PathBuf>) -> Result<()> {
     let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
     let handle = device.open()?;
     let config = device.active_config_descriptor()?;
@@ -749,7 +752,6 @@ fn cmd_save_read(byte_addr: u32, count: u32, save_type: char) -> Result<()> {
     let mut cart_data = Vec::new();
     for chunk in 0..count {
         let addr = byte_addr + chunk * 64;
-        // Packet format: [0x02, addr0, addr1, addr2, suffix]
         let mut cmd = [0x02u8, 0, 0, 0, suffix, 0];
         cmd[1] = (addr & 0xFF) as u8;
         cmd[2] = ((addr >> 8) & 0xFF) as u8;
@@ -762,7 +764,6 @@ fn cmd_save_read(byte_addr: u32, count: u32, save_type: char) -> Result<()> {
             Ok(len) => {
                 cart_data.extend_from_slice(&buf[..len]);
                 let h: String = buf[..16].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-                // EP2 alternates: even chunks = save, odd = ROM. Only show save.
                 if chunk % 2 == 0 {
                     println!("  [{chunk:02}] 0x{:06X}: {}", addr, h);
                 }
@@ -772,6 +773,11 @@ fn cmd_save_read(byte_addr: u32, count: u32, save_type: char) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     println!("  Total: {} bytes", cart_data.len());
+
+    if let Some(path) = output {
+        fs::write(&path, &cart_data).context("writing save file")?;
+        println!("  Wrote to {}", path.display());
+    }
     Ok(())
 }
 
@@ -869,13 +875,18 @@ fn cmd_cart_read(byte_addr: u32, count: u32, cmd_byte: u8, bank: Option<u8>, byt
     Ok(())
 }
 
-fn cmd_dump(output: PathBuf, start_addr: u32, size: u32, delay_ms: u64) -> Result<()> {
+fn cmd_dump(mut output: PathBuf, start_addr: u32, size: u32, delay_ms: u64) -> Result<()> {
     let total_size = if size == 0 {
         32 * 1024 * 1024 - start_addr  // max GBA ROM minus start
     } else {
         size
     };
     let chunk_count = (total_size + 63) / 64;  // round up
+
+    // Auto-add .gba extension if no extension present
+    if output.extension().is_none_or(|e| e.is_empty()) {
+        output.set_extension("gba");
+    }
 
     let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
     println!("Found EZ-Writer active mode.");
@@ -1044,7 +1055,7 @@ fn main() -> Result<()> {
         Commands::ResetCart => cmd_reset_cart(),
             Commands::Dump { output, addr, size, delay_ms } => cmd_dump(output, addr, size, delay_ms),
         Commands::CartRead { addr, count, cmd, bank, byte3_bank } => cmd_cart_read(addr, count, cmd, bank, byte3_bank),
-        Commands::SaveRead { addr, count, save_type } => cmd_save_read(addr, count, save_type),
+        Commands::SaveRead { addr, count, save_type, output } => cmd_save_read(addr, count, save_type, output),
         Commands::Reset => cmd_reset(),
         Commands::Probe { request, value } => cmd_probe(request, value),
         Commands::RamRead { address } => cmd_ram_read(address),

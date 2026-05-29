@@ -1,6 +1,8 @@
 target/
 *.bin
 *.ihx
+*.sav
+*.gba
 captures/
 original/
 original_backup/
