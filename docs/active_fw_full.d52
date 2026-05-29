@@ -1,13 +1,0 @@
-
-D52 8052 Disassembler V3.3.6
-Copyright (C) 1995-2005 by J. L. Post
-Released under the GNU General Public License
-Initializing program spaces...
-reading active_fw_full.bin
-0100020003000400050006000700080009000a000b000c000d000e000f001000110012001300140015001600170018001900Highest location = 1928
-
-Pass 1 0000Pass 1 0100Pass 1 0200Pass 1 0300Pass 1 0400Pass 1 0500Pass 1 0600Pass 1 0700Pass 1 0800Pass 1 0900Pass 1 0a00Pass 1 0b00Pass 1 0c00Pass 1 0d00Pass 1 0e00Pass 1 0f00Pass 1 1000Pass 1 1100Pass 1 1200Pass 1 1300Pass 1 1400Pass 1 1500Pass 1 1600Pass 1 1700Pass 1 1800Pass 1 1900Pass 1 - Reference search complete
-Pass 2 0000Pass 2 0100Pass 2 0200Pass 2 0300Pass 2 0400Pass 2 0500Pass 2 0600Pass 2 0700Pass 2 0800Pass 2 0900Pass 2 0a00Pass 2 0b00Pass 2 0c00Pass 2 0d00Pass 2 0e00Pass 2 0f00Pass 2 1000Pass 2 1100Pass 2 1200Pass 2 1300Pass 2 1400Pass 2 1500Pass 2 1600Pass 2 1700Pass 2 1800Pass 2 1900Pass 2 - Source generation complete
-Pass 3 0000Pass 3 1000Pass 3 2000Pass 3 3000Pass 3 4000Pass 3 5000Pass 3 6000Pass 3 7000Pass 3 8000Pass 3 9000Pass 3 a000Pass 3 b000Pass 3 c000Pass 3 d000Pass 3 e000Pass 3 f000Pass 3 - Equate generation complete
-Done
-

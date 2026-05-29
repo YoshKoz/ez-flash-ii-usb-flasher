@@ -6,6 +6,8 @@ target/
 captures/
 original/
 original_backup/
+deps/
+captures/*.pcap
 !tusbez.bin
 !loader_table1.bin
 !loader_table2.bin
