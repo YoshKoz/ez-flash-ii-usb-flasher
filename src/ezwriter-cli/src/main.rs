@@ -23,7 +23,7 @@ const VR_CYPRESS_WRITE: u8 = 0xA0;
 
 /// CPUCS register address for AN2131 (EZ-USB FX, not FX2)
 /// AN2131 register map: CPUCS at 0x7F92
-/// Bit 0: 8051RES (0=run, 1=reset)
+/// Bit 0: 8051RES (0=reset, 1=run)
 const CPUCS_ADDR: u16 = 0x7F92;
 
 /// Timeout for USB control transfers
@@ -304,7 +304,7 @@ fn download_firmware(handle: &DeviceHandle<GlobalContext>, firmware: &[u8], no_c
     // 1. Optionally hold CPU in reset
     if !no_cpu {
         println!("  Asserting CPU reset...");
-        ezusb_write_ram(handle, CPUCS_ADDR as u32, &[0x01])?;
+        ezusb_write_ram(handle, CPUCS_ADDR as u32, &[0x00])?;
     } else {
         println!("  Skipping CPU reset (--no-cpu)");
     }
@@ -339,7 +339,7 @@ fn download_firmware(handle: &DeviceHandle<GlobalContext>, firmware: &[u8], no_c
     // 3. Optionally start CPU
     if !no_cpu {
         println!("  Starting CPU (device will re-enumerate)...");
-        ezusb_write_ram(handle, CPUCS_ADDR as u32, &[0x00])?;
+        ezusb_write_ram(handle, CPUCS_ADDR as u32, &[0x01])?;
     } else {
         println!("  Skipping CPU start (--no-cpu, bootloader may auto-start)");
     }
