@@ -127,8 +127,8 @@ For homebrew, backing up saves from carts you own, and GBA development. **Not fo
 
 ## References
 
-[Cypress AN2131](https://www.cypress.com/documentation/datasheets/ez-usb-fx2-usb-20-microcontroller-high-speed-usb-peripheral-controller) ·
+[Cypress AN2131 / Infineon EZ-USB FX2LP](https://www.infineon.com/cms/en/product/usb-solutions/ez-usb-fx2lp/) ·
 [libusb](https://libusb.info/) ·
-[WinUSB](https://docs.microsoft.com/en-us/windows-hardware/drivers/usbcon/winusb) ·
+[WinUSB](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/introduction-to-winusb-for-developers) ·
 [Zadig](https://zadig.akeo.ie/) ·
 [egui](https://github.com/emilk/egui)
