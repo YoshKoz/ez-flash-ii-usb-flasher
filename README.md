@@ -36,6 +36,8 @@ ezwriter-cli save-read 0 2048 --output myrom.sav
 
 `tusbez.bin` is the original 8051 firmware extracted from the EZ-Writer driver. It's uploaded to the Cypress AN2131's RAM at every connect (the chip has no persistent ROM). Included in the repo under [`src/ezwriter-cli/`](src/ezwriter-cli/).
 
+The **Cypress AN2131Q** (EZ-USB FX family) is a USB microcontroller with an 8051 core running at 48 MHz. It has no internal flash — code loads from the host into its 8 KB RAM over the USB control endpoint. This is why every EZ-Writer needs `tusbez.bin` sent before use.
+
 ---
 
 ## Status
