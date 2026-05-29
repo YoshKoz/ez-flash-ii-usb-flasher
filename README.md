@@ -59,23 +59,68 @@ cargo build --release
 
 Keep `loader_table1.bin` and `loader_table2.bin` next to the `.exe`.
 
-Tabs: Status · Cart Info · Read ROM · Read Save · Write Save (soon)
+Tabs: Status · Cart Info · Read ROM · Read Save · Write Save
 
 ---
 
-<details>
-<summary><b>Architecture</b> — how it works</summary>
+## How It Works
+
+### System Architecture
+
+```mermaid
+flowchart LR
+    PC["Your PC<br/>(ezwriter-cli / ezwriter-gui)"]
+    USB["USB bus<br/>(libusb + WinUSB)"]
+    MCU["Cypress AN2131Q<br/>8051 CPU @ 48 MHz"]
+    CART["EZ-Flash II<br/>GBA Cartridge"]
+
+    PC <--> USB
+    USB <-->|"EP0 (control)<br/>EP2 (bulk OUT)<br/>EP6 (bulk IN)"| MCU
+    MCU <-->|"GPIO / parallel bus"| CART
+
+    style PC fill:#1a1a2e,color:#fff,stroke:#e94560
+    style USB fill:#16213e,color:#fff,stroke:#0f3460
+    style MCU fill:#0f3460,color:#fff,stroke:#e94560
+    style CART fill:#533483,color:#fff,stroke:#e94560
+```
+
+### Boot Sequence
+
+```mermaid
+sequenceDiagram
+    participant H as Host PC
+    participant D as EZ-Writer (0547:2131)
+    participant F as 8051 Firmware
+    participant C as GBA Cartridge
+
+    Note over H,D: Phase 1 — Bootloader mode
+    H->>D: Plug in (VID 0x0547, PID 0x2131)
+    H->>D: Vendor 0xA0: hold CPU reset (CPUCS = 0x01)
+    H->>D: Vendor 0xA0: download tusbez.bin (5584 bytes)
+    H->>D: Vendor 0xA0: start CPU (CPUCS = 0x00)
+    D->>F: Boot firmware
+    Note over H,D: Phase 2 — Active mode
+    D-->>H: Re-enumerate (VID 0x0548, PID 0x1005)
+    H->>D: Bulk EP2 OUT: cartridge commands
+    D->>C: Translate to GBA bus protocol
+    C-->>D: ROM / save data
+    D-->>H: Bulk EP6 IN: response data
+```
+
+### Data Flow
 
 ```
-PC (libusb) ←→ USB EP0/EP4/EP2 ←→ Cypress AN2131Q (8051) ←→ GBA cartridge
+┌─────────────┐   libusb    ┌──────────────┐   parallel bus   ┌──────────────┐
+│  Your App   │◄───────────►│ EZ-USB AN2131│◄────────────────►│EZ-Flash II   │
+│  (CLI/GUI)  │  WinUSB     │ 8051 firmware │   GPIO/FPGA     │ GBA Cartridge│
+│             │  bulk EP    │ tusbez.bin    │                 │ NOR + SRAM   │
+│ libusb API  │  control    │               │                 │              │
+└─────────────┘             └──────────────┘                 └──────────────┘
 ```
-
-**Boot sequence:** Device boots as 0547:2131 (Cypress bootloader). Host sends `tusbez.bin` via vendor request 0xA0, starts CPU, device re-enumerates as 0548:1005 (active mode).
 
 **Why not kernel driver?** Original drivers are unsigned x32-only (won't load on modern Windows) and just wrap USB bulk IOCTLs anyway. WinUSB + libusb does the same thing cleanly.
 
 Full protocol reference: [docs/protocol_notes.md](docs/protocol_notes.md)
-</details>
 
 <details>
 <summary><b>Project structure</b></summary>
