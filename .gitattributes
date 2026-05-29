@@ -1,0 +1,22 @@
+# Normalize to LF in repo, auto-convert on checkout per OS
+* text=auto
+
+# Explicitly CRLF for Windows batch files
+*.bat text eol=crlf
+
+# Explicitly LF for everything else (preferred for cross-platform)
+*.md text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+*.inf text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+LICENSE text eol=lf
+
+# Binary files
+*.bin binary
+*.png binary
+*.ico binary
