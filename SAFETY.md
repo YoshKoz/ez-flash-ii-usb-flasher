@@ -8,8 +8,8 @@
 | `info` | **None** | Read-only USB descriptor |
 | `firmware-download` | **Low** | RAM firmware only, resets on power cycle |
 | `identify` / `cart-info` | **Low** | Read-only command to cartridge |
-| `dump-rom` | **Low** | Read-only ROM dump |
-| `read-save` | **Low** | Read-only save data |
+| `dump` | **Low** | Read-only ROM dump |
+| `save-read` | **Low** | Read-only save data |
 | `write-rom` | **HIGH** | Can brick cart if interrupted |
 | `write-save` | **Medium** | Save data write |
 | `erase` | **HIGH** | Destructive - wipes cartridge |
@@ -32,8 +32,8 @@
 
 ## Before Any Write Operation
 
-1. **Always dump ROM first**: `ezwriter-cli dump-rom backup.gba`
-2. **Always dump save first**: `ezwriter-cli read-save backup.sav`
+1. **Always dump ROM first**: `ezwriter-cli dump backup.gba`
+2. **Always dump save first**: `ezwriter-cli save-read 0 2048 --output backup.sav`
 3. **Verify the dump**: Check file size and first few bytes
 4. **Confirm you have a backup** before erasing or writing
 
