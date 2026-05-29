@@ -110,12 +110,18 @@ sequenceDiagram
 ### Data Flow
 
 ```
-┌─────────────┐   libusb    ┌──────────────┐   parallel bus   ┌──────────────┐
-│  Your App   │◄───────────►│ EZ-USB AN2131│◄────────────────►│EZ-Flash II   │
-│  (CLI/GUI)  │  WinUSB     │ 8051 firmware │   GPIO/FPGA     │ GBA Cartridge│
-│             │  bulk EP    │ tusbez.bin    │                 │ NOR + SRAM   │
-│ libusb API  │  control    │               │                 │              │
-└─────────────┘             └──────────────┘                 └──────────────┘
+┌──────────────────┐  ┌────────────────────┐  ┌────────────────────┐
+│    Your App      │  │  EZ-USB AN2131Q    │  │  EZ-Flash II       │
+│  (CLI / GUI)     │  │  8051 firmware     │  │  GBA Cartridge     │
+│  libusb + WinUSB │  │  tusbez.bin        │  │  NOR flash + SRAM  │
+└──────────────────┘  └────────────────────┘  └────────────────────┘
+         │                                         │
+         └──────── USB (EP0/EP2/EP6) ──────────────┘
+                              │
+                        GPIO / parallel bus
+                              │
+                              ▼
+                     Cartridge operations
 ```
 
 **Why not kernel driver?** Original drivers are unsigned x32-only (won't load on modern Windows) and just wrap USB bulk IOCTLs anyway. WinUSB + libusb does the same thing cleanly.
