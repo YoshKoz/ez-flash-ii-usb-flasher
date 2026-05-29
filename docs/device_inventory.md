@@ -22,7 +22,7 @@ To collect full descriptors:
 2. Run as Administrator
 3. Plug in device
 4. Right-click → Save device tree as text
-5. Paste output into `captures/device_tree.txt`
+5. Save output as `captures/device_tree.txt` (note: `captures/` is gitignored)
 
 Device currently appears in **initialization/bootloader mode**. After firmware download via kernel driver, it re-enumerates with:
 

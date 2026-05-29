@@ -66,6 +66,7 @@ enum BgCmd {
     Header(Box<Option<device::CartHeader>>),
     Progress(String),
     DumpProgress { bytes_read: u64, total_bytes: u64 },
+    SaveWriteProgress { bytes_read: u64, total_bytes: u64 },
     Error(String),
 }
 
@@ -128,6 +129,16 @@ impl eframe::App for EzWriterApp {
                         pct * 100.0
                     );
                 }
+                BgCmd::SaveWriteProgress { bytes_read, total_bytes } => {
+                    let pct = bytes_read as f64 / total_bytes as f64;
+                    self.progress_value = pct as f32;
+                    self.progress = format!(
+                        "Writing save: {:.0}% ({:.1} / {:.1} KB)",
+                        pct * 100.0,
+                        bytes_read as f64 / 1024.0,
+                        total_bytes as f64 / 1024.0
+                    );
+                }
                 BgCmd::Error(e) => {
                     self.progress = format!("Error: {e}");
                     self.cart_header = None;
@@ -178,7 +189,7 @@ impl eframe::App for EzWriterApp {
             AppTab::CartInfo => self.show_cart_info(ui),
             AppTab::ReadRom => self.show_read_rom(ui, ctx),
             AppTab::ReadSave => self.show_read_save(ui, ctx),
-            AppTab::WriteSave => self.show_write_save(ui),
+            AppTab::WriteSave => self.show_write_save(ui, ctx),
         });
     }
 }
@@ -449,7 +460,7 @@ impl EzWriterApp {
         ctx.request_repaint();
     }
 
-    fn show_write_save(&mut self, ui: &mut egui::Ui) {
+    fn show_write_save(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Write Save to Cartridge");
         ui.colored_label(
             egui::Color32::RED,
@@ -459,6 +470,8 @@ impl EzWriterApp {
         if let Some(ref hdr) = self.cart_header {
             ui.label(format!("Current cart: {} [{}]", hdr.title, hdr.code));
             ui.label(format!("Save type: {}", hdr.save_type));
+        } else {
+            ui.label("(!) No cartridge detected — detect in Cart Info tab first");
         }
         ui.horizontal(|ui| {
             if ui.button("[..] Select Save File...").clicked()
@@ -472,13 +485,40 @@ impl EzWriterApp {
             }
             ui.label(self.save_path.display().to_string());
         });
-        if !self.save_path.as_os_str().is_empty() {
+        if !self.save_path.as_os_str().is_empty() && self.cart_header.is_some() {
             ui.separator();
-            ui.colored_label(egui::Color32::YELLOW, "Write save not yet implemented.");
-            ui.label("Requires reverse engineering the erase+program protocol from EZClient.exe.");
+            if ui.button("[w] Write Save to Cartridge").clicked() {
+                let path = self.save_path.clone();
+                let tx = self.tx.clone();
+                let save_type = self.cart_header.as_ref().map_or("FLASH 128K".to_string(), |h| h.save_type.clone());
+                thread::spawn(move || {
+                    let data = match std::fs::read(&path) {
+                        Ok(d) => d,
+                        Err(e) => { let _ = tx.send(BgCmd::Error(e.to_string())); return; }
+                    };
+                    let total = data.len() as u64;
+                    match device::write_save(&data, &save_type, |read, tot| {
+                        let _ = tx.send(BgCmd::SaveWriteProgress { bytes_read: read, total_bytes: tot });
+                    }) {
+                        Ok(msg) => {
+                            let _ = tx.send(BgCmd::SaveWriteProgress { bytes_read: total, total_bytes: total });
+                            let _ = tx.send(BgCmd::Progress(msg));
+                        }
+                        Err(e) => { let _ = tx.send(BgCmd::Error(e.to_string())); }
+                    }
+                });
+            }
+        }
+        if self.progress_value > 0.0 {
+            ui.add(
+                egui::ProgressBar::new(self.progress_value)
+                    .show_percentage()
+                    .animate(true),
+            );
         }
         ui.separator();
         ui.label(&self.progress);
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
 

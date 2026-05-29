@@ -20,7 +20,7 @@ if %errorlevel% neq 0 (
 )
 
 echo STEP 1: Checking for existing EZ-Writer driver...
-pnputil /enum-drivers | findstr /i "ezwriter ezwinit ezwrit apoader" >nul 2>&1
+pnputil /enum-drivers | findstr /i "ezwriter ezwinit ezwrit aploader" >nul 2>&1
 if !errorlevel! equ 0 (
     echo WARNING: Found existing EZ-Writer kernel driver installed.
     echo You may need to uninstall it first via Device Manager.
@@ -29,7 +29,7 @@ if !errorlevel! equ 0 (
     choice /C YN /M "Uninstall old driver packages automatically?"
     if !errorlevel! equ 1 (
         echo Removing old EZ-Writer driver packages...
-        for /f "tokens=2" %%a in ('pnputil /enum-drivers ^| findstr /i "ezwriter ezwinit ezwrit apoader"') do (
+        for /f "tokens=2" %%a in ('pnputil /enum-drivers ^| findstr /i "ezwriter ezwinit ezwrit aploader"') do (
             pnputil /delete-driver %%a /uninstall 2>nul
         )
     )

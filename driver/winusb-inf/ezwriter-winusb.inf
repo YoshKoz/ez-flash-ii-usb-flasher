@@ -16,7 +16,7 @@ Class = USBDevice
 ClassGuid = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
 Provider = "EZ-Writer Open Source Project"
 DriverVer = 08/01/2024,1.0.0.0
-CatalogFile = ezwriter-winusb.cat
+;CatalogFile = ezwriter-winusb.cat   (not provided - use Zadig for signed installation)
 ; This INF is designed for WinUSB only - no kernel driver
 
 [Manufacturer]

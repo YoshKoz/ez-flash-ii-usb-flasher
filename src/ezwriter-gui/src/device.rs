@@ -764,6 +764,61 @@ pub fn dump_to_file(path: &PathBuf, data: &[u8]) -> Result<()> {
     std::fs::write(path, data).with_context(|| format!("Failed to write {}", path.display()))
 }
 
+// ---------------------------------------------------------------------------
+// Save write
+// ---------------------------------------------------------------------------
+
+/// Write save data to cartridge.
+/// Protocol:
+///   1. Select save type via cmd 0x14 + suffix byte ('f'=FLASH, 'e'=EEPROM, 's'=SRAM)
+///   2. Erase sectors for FLASH using cmd 0x15
+///   3. Write 64-byte chunks using cmd 0x03 + address + suffix + data
+pub fn write_save(data: &[u8], save_type: &str, cb: impl Fn(u64, u64)) -> Result<String> {
+    let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+    let suffix = if save_type.contains("EEPROM") { b'e' } else if save_type.contains("SRAM") { b's' } else { b'f' };
+
+    // Select save type
+    let select = [0x14u8, suffix, 0x00];
+    handle.write_bulk(CMD_EP, &select, TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Erase FLASH sectors
+    if suffix == b'f' {
+        let sector_size = 4096u32;
+        let sectors = (data.len() as u32).div_ceil(sector_size);
+        for s in 0..sectors {
+            let sec_addr = s * sector_size;
+            let erase = [0x15, (sec_addr & 0xFF) as u8, ((sec_addr >> 8) & 0xFF) as u8, ((sec_addr >> 16) & 0xFF) as u8, suffix];
+            let _ = handle.write_bulk(CMD_EP, &erase[..5], TIMEOUT);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    // Write 64-byte chunks
+    let total = data.len() as u64;
+    for (i, chunk) in data.chunks(64).enumerate() {
+        let addr = (i * 64) as u32;
+        let mut cmd = vec![0x03u8,
+            (addr & 0xFF) as u8,
+            ((addr >> 8) & 0xFF) as u8,
+            ((addr >> 16) & 0xFF) as u8,
+            suffix];
+        cmd.extend_from_slice(chunk);
+        handle.write_bulk(CMD_EP, &cmd, TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(10));
+
+        let mut status = [0u8; 64];
+        let _ = handle.read_bulk(DATA_EP, &mut status, Duration::from_millis(20));
+
+        if i % 64 == 0 || i + 1 == data.len().div_ceil(64) {
+            let written = ((i + 1) * 64) as u64;
+            cb(written.min(total), total);
+        }
+    }
+
+    Ok(format!("Wrote {} bytes to cartridge save", data.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

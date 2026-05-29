@@ -114,8 +114,11 @@ enum Commands {
         #[arg(default_value = "0")]
         size: u32,
         /// Delay between chunks in ms
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "10")]
         delay_ms: u64,
+        /// Pipelined mode: overlap read requests for speed (experimental)
+        #[arg(long)]
+        fast: bool,
     },
     /// Read save data (cmd 0x14 = select type, then cmd 0x02 = read)
     SaveRead {
@@ -152,6 +155,43 @@ enum Commands {
         address: u16,
         /// Byte value to write
         value: u8,
+    },
+    /// Write save data to cartridge
+    SaveWrite {
+        /// Input save file (.sav)
+        input: PathBuf,
+        /// Start offset in save memory
+        #[arg(default_value = "0")]
+        addr: u32,
+        /// Save type: f=FLASH, e=EEPROM, s=SRAM
+        #[arg(long, default_value = "f")]
+        save_type: char,
+        /// Write command byte (experimental)
+        #[arg(long, default_value_t = 0x03)]
+        write_cmd: u8,
+        /// Erase command byte for FLASH sectors (experimental)
+        #[arg(long, default_value_t = 0x15)]
+        erase_cmd: u8,
+    },
+    /// Write ROM to cartridge (experimental — NOR flash protocol not yet confirmed)
+    RomWrite {
+        /// Input ROM file (.gba)
+        input: PathBuf,
+        /// Start offset in cartridge ROM
+        #[arg(default_value = "0")]
+        addr: u32,
+        /// Delay between chunk writes in ms
+        #[arg(long, default_value = "10")]
+        delay_ms: u64,
+        /// Skip sector erase
+        #[arg(long)]
+        no_erase: bool,
+        /// Write command byte (experimental)
+        #[arg(long, default_value_t = 0x11)]
+        write_cmd: u8,
+        /// Erase sector command byte (experimental)
+        #[arg(long, default_value_t = 0x10)]
+        erase_cmd: u8,
     },
     /// Passive read-only poll of active IN endpoints (sends no data)
     PassiveRead,
@@ -197,13 +237,13 @@ fn print_device_info(desc: &DeviceDescriptor, handle: &DeviceHandle<GlobalContex
     // Read string descriptors if available
     let lang = handle.read_languages(TIMEOUT).unwrap_or_default();
     if let Some(&first_lang) = lang.first() {
-        if let Ok(s) = handle.read_manufacturer_string(first_lang, &desc, TIMEOUT) {
+        if let Ok(s) = handle.read_manufacturer_string(first_lang, desc, TIMEOUT) {
             println!("  Manufacturer:  {}", s);
         }
-        if let Ok(s) = handle.read_product_string(first_lang, &desc, TIMEOUT) {
+        if let Ok(s) = handle.read_product_string(first_lang, desc, TIMEOUT) {
             println!("  Product:       {}", s);
         }
-        if let Ok(s) = handle.read_serial_number_string(first_lang, &desc, TIMEOUT) {
+        if let Ok(s) = handle.read_serial_number_string(first_lang, desc, TIMEOUT) {
             println!("  Serial:        {}", s);
         }
     }
@@ -404,10 +444,8 @@ fn cmd_firmware_download(firmware_path: &PathBuf, no_cpu: bool) -> Result<()> {
     
     // Claim interface 0 (usually the only interface in bootloader mode)
     let config = device.active_config_descriptor()?;
-    if let Some(iface) = config.interfaces().next() {
-        if let Some(desc) = iface.descriptors().next() {
-            handle.claim_interface(desc.interface_number())?;
-        }
+    if let Some(iface) = config.interfaces().next() && let Some(desc) = iface.descriptors().next() {
+        handle.claim_interface(desc.interface_number())?;
     }
 
     download_firmware(&handle, &firmware, no_cpu)?;
@@ -467,10 +505,8 @@ fn cmd_init_exact(table1: &PathBuf, table2: &PathBuf) -> Result<()> {
     let handle = device.open()?;
     let _ = handle.detach_kernel_driver(0);
     let config = device.active_config_descriptor()?;
-    if let Some(iface) = config.interfaces().next() {
-        if let Some(desc) = iface.descriptors().next() {
-            let _ = handle.claim_interface(desc.interface_number());
-        }
+    if let Some(iface) = config.interfaces().next() && let Some(desc) = iface.descriptors().next() {
+        let _ = handle.claim_interface(desc.interface_number());
     }
 
     cpucs(&handle, 1)?;
@@ -543,10 +579,8 @@ fn cmd_probe(request: u8, value: u16) -> Result<()> {
 
     let handle = device.open()?;
     let config = device.active_config_descriptor()?;
-    if let Some(iface) = config.interfaces().next() {
-        if let Some(desc) = iface.descriptors().next() {
-            handle.claim_interface(desc.interface_number())?;
-        }
+    if let Some(iface) = config.interfaces().next() && let Some(desc) = iface.descriptors().next() {
+        handle.claim_interface(desc.interface_number())?;
     }
 
     // Send vendor request: Host-to-Device, Vendor, Device
@@ -592,10 +626,8 @@ fn cmd_ram_read(address: u16) -> Result<()> {
 
     let handle = device.open()?;
     let config = device.active_config_descriptor()?;
-    if let Some(iface) = config.interfaces().next() {
-        if let Some(desc) = iface.descriptors().next() {
-            handle.claim_interface(desc.interface_number())?;
-        }
+    if let Some(iface) = config.interfaces().next() && let Some(desc) = iface.descriptors().next() {
+        handle.claim_interface(desc.interface_number())?;
     }
 
     // Read from internal RAM via vendor request 0xA3 (Upload)
@@ -639,10 +671,8 @@ fn cmd_ram_write(address: u16, value: u8) -> Result<()> {
 
     let handle = device.open()?;
     let config = device.active_config_descriptor()?;
-    if let Some(iface) = config.interfaces().next() {
-        if let Some(desc) = iface.descriptors().next() {
-            handle.claim_interface(desc.interface_number())?;
-        }
+    if let Some(iface) = config.interfaces().next() && let Some(desc) = iface.descriptors().next() {
+        handle.claim_interface(desc.interface_number())?;
     }
 
     let data = [value];
@@ -875,13 +905,13 @@ fn cmd_cart_read(byte_addr: u32, count: u32, cmd_byte: u8, bank: Option<u8>, byt
     Ok(())
 }
 
-fn cmd_dump(mut output: PathBuf, start_addr: u32, size: u32, delay_ms: u64) -> Result<()> {
+fn cmd_dump(mut output: PathBuf, start_addr: u32, size: u32, _delay_ms: u64, fast: bool) -> Result<()> {
     let total_size = if size == 0 {
         32 * 1024 * 1024 - start_addr  // max GBA ROM minus start
     } else {
         size
     };
-    let chunk_count = (total_size + 63) / 64;  // round up
+    let chunk_count = total_size.div_ceil(64);
 
     // Auto-add .gba extension if no extension present
     if output.extension().is_none_or(|e| e.is_empty()) {
@@ -911,7 +941,6 @@ fn cmd_dump(mut output: PathBuf, start_addr: u32, size: u32, delay_ms: u64) -> R
 
     let cmd_ep = 0x04;
     let data_ep = 0x82;
-    let delay = Duration::from_millis(delay_ms);
 
     println!("Dumping {} bytes ({} chunks) starting at 0x{:X} to {}",
         total_size, chunk_count, start_addr, output.display());
@@ -922,50 +951,96 @@ fn cmd_dump(mut output: PathBuf, start_addr: u32, size: u32, delay_ms: u64) -> R
         .with_context(|| format!("Failed to create output file: {}", output.display()))?;
     use std::io::Write;
 
-    let mut last_pct = 0u32;
-    for chunk in 0..chunk_count {
-        let byte_addr = start_addr + chunk * 64;
-        let word_addr = byte_addr / 2;
-        let bank = (word_addr >> 16) as u8;
-        let addr_16 = (word_addr & 0xFFFF) as u16;
-
-        let cmd = [0x01u8, (addr_16 & 0xFF) as u8, ((addr_16 >> 8) & 0xFF) as u8, bank];
-        if let Err(e) = handle.write_bulk(cmd_ep, &cmd, TIMEOUT) {
-            println!("\n  ERROR at chunk {} (0x{:X}): write_bulk: {e}", chunk, byte_addr);
-            break;
-        }
-        std::thread::sleep(delay);
-
-        let mut buf = [0u8; 64];
-        // Retry read up to 5 times with exponential backoff
-        let mut read_ok = false;
-        for retry in 0..5 {
-            match handle.read_bulk(data_ep, &mut buf, Duration::from_secs(3)) {
-                Ok(len) => {
-                    file.write_all(&buf[..len])?;
-                    read_ok = true;
+    if fast {
+        println!("  FAST pipelined mode — overlapping writes/reads");
+        // Pipeline depth 2: write next command while reading previous response
+        let mut prev_buf: Option<[u8; 64]> = None;
+        for chunk in 0..=chunk_count {
+            if chunk < chunk_count {
+                let byte_addr = start_addr + chunk * 64;
+                let word_addr = byte_addr / 2;
+                let bank = (word_addr >> 16) as u8;
+                let addr_16 = (word_addr & 0xFFFF) as u16;
+                let cmd = [0x01u8, (addr_16 & 0xFF) as u8, ((addr_16 >> 8) & 0xFF) as u8, bank];
+                // Write next command immediately
+                if let Err(e) = handle.write_bulk(cmd_ep, &cmd, TIMEOUT) {
+                    println!("\n  ERROR at chunk {}: write_bulk: {e}", chunk);
                     break;
                 }
-                Err(e) => {
-                    if retry < 4 {
-                        let backoff = 5u64 * (1u64 << retry); // 5, 10, 20, 40 ms
-                        std::thread::sleep(Duration::from_millis(backoff));
-                    } else {
-                        println!("\n  ERROR at chunk {} (0x{:X}): read_bulk (after {} retries): {e}", chunk, byte_addr, retry);
+            }
+            // Read previous response while writing overlaps
+            if let Some(buf) = prev_buf.take() {
+                file.write_all(&buf)?;
+            }
+            if chunk < chunk_count {
+                let mut buf = [0u8; 64];
+                match handle.read_bulk(data_ep, &mut buf, Duration::from_millis(500)) {
+                    Ok(_len) => {
+                        prev_buf = Some(buf);
+                        if chunk % 256 == 0 && chunk > 0 {
+                            let pct = (chunk * 100) / chunk_count;
+                            let addr_mb = (start_addr + chunk * 64) as f64 / (1024.0 * 1024.0);
+                            print!("\r  Progress: {}% ({:.1} MB)", pct, addr_mb);
+                            use std::io::Write;
+                            std::io::stdout().flush()?;
+                        }
+                    }
+                    Err(e) => {
+                        println!("\n  ERROR at chunk {}: read_bulk: {e}", chunk);
+                        break;
                     }
                 }
             }
         }
-        if !read_ok { break; }
-
-        // Progress indicator
-        let pct = (chunk * 100) / chunk_count;
-        if pct != last_pct {
-            last_pct = pct;
-            let addr_mb = byte_addr as f64 / (1024.0 * 1024.0);
-            print!("\r  Progress: {}% (0x{:X}, {:.1} MB)", pct, byte_addr, addr_mb);
-            use std::io::Write;
-            std::io::stdout().flush()?;
+    } else {
+        let mut last_pct = 0u32;
+        let mut prev_cmd_written = false;
+        let mut prev_addr = 0u32;
+        if chunk_count > 0 {
+            let byte_addr = start_addr;
+            let word_addr = byte_addr / 2;
+            let bank = (word_addr >> 16) as u8;
+            let addr_16 = (word_addr & 0xFFFF) as u16;
+            let cmd = [0x01u8, (addr_16 & 0xFF) as u8, ((addr_16 >> 8) & 0xFF) as u8, bank];
+            if let Err(e) = handle.write_bulk(cmd_ep, &cmd, TIMEOUT) {
+                println!("\n  ERROR at chunk 0: write_bulk: {e}");
+            } else {
+                prev_cmd_written = true;
+                prev_addr = byte_addr;
+            }
+        }
+        for chunk in 0..chunk_count {
+            if !prev_cmd_written { break; }
+            let mut buf = [0u8; 64];
+            match handle.read_bulk(data_ep, &mut buf, Duration::from_secs(3)) {
+                Ok(len) => {
+                    file.write_all(&buf[..len])?;
+                    // Write next command while reading overlap
+                    let next_addr = start_addr + (chunk + 1) * 64;
+                    if chunk + 1 < chunk_count {
+                        let word_addr = next_addr / 2;
+                        let bank = (word_addr >> 16) as u8;
+                        let addr_16 = (word_addr & 0xFFFF) as u16;
+                        let cmd = [0x01u8, (addr_16 & 0xFF) as u8, ((addr_16 >> 8) & 0xFF) as u8, bank];
+                        prev_cmd_written = handle.write_bulk(cmd_ep, &cmd, TIMEOUT).is_ok();
+                        prev_addr = next_addr;
+                    } else {
+                        prev_cmd_written = false;
+                    }
+                }
+                Err(e) => {
+                    println!("\n  ERROR at chunk {}: read_bulk: {e}", chunk);
+                    break;
+                }
+            }
+            let pct = (chunk * 100) / chunk_count;
+            if pct != last_pct {
+                last_pct = pct;
+                let addr_mb = prev_addr as f64 / (1024.0 * 1024.0);
+                print!("\r  Progress: {}% ({:.1} MB)", pct, addr_mb);
+                use std::io::Write;
+                std::io::stdout().flush()?;
+            }
         }
     }
     println!();
@@ -974,6 +1049,142 @@ fn cmd_dump(mut output: PathBuf, start_addr: u32, size: u32, delay_ms: u64) -> R
         .map(|m| m.len())
         .unwrap_or(0);
     println!("  Dumped {} bytes to {}", file_size, output.display());
+    Ok(())
+}
+
+fn cmd_save_write(input: PathBuf, byte_addr: u32, save_type: char, write_cmd: u8, erase_cmd: u8) -> Result<()> {
+    let data = fs::read(&input)
+        .with_context(|| format!("reading save file: {}", input.display()))?;
+    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+    let handle = device.open()?;
+    let config = device.active_config_descriptor()?;
+    for iface in config.interfaces() {
+        for iface_desc in iface.descriptors() {
+            let _ = handle.claim_interface(iface_desc.interface_number());
+        }
+    }
+    for ep in 0x01u8..=0x07u8 { let _ = handle.clear_halt(ep); let _ = handle.clear_halt(ep | 0x80); }
+
+    let cmd_ep = 0x04;
+    let suffix = save_type as u8;
+
+    // Step 1: Select save type
+    let select_cmd = [0x14u8, suffix, 0x00];
+    handle.write_bulk(cmd_ep, &select_cmd, TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(50));
+
+    println!("Writing {} bytes to save (type='{}') at offset 0x{:X}", data.len(), save_type, byte_addr);
+
+    // For FLASH saves: erase sectors first (4KB sectors)
+    if save_type == 'f' || save_type == 'F' {
+        let sector_size = 4096u32;
+        let start_sector = byte_addr / sector_size;
+        let end_sector = (byte_addr + data.len() as u32).div_ceil(sector_size);
+        println!("  Erasing {} sectors...", end_sector - start_sector);
+        for sector in start_sector..end_sector {
+            let sec_addr = sector * sector_size;
+            let erase = [erase_cmd, (sec_addr & 0xFF) as u8, ((sec_addr >> 8) & 0xFF) as u8, ((sec_addr >> 16) & 0xFF) as u8, suffix];
+            let _ = handle.write_bulk(cmd_ep, &erase[..5], TIMEOUT);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    // Step 2: Write save data in 64-byte chunks
+    for (i, chunk) in data.chunks(64).enumerate() {
+        let addr = byte_addr + (i * 64) as u32;
+        let mut cmd = vec![write_cmd,
+            (addr & 0xFF) as u8,
+            ((addr >> 8) & 0xFF) as u8,
+            ((addr >> 16) & 0xFF) as u8,
+            suffix];
+        cmd.extend_from_slice(chunk);
+        handle.write_bulk(cmd_ep, &cmd, TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Try reading a status byte back (best-effort)
+        let mut status = [0u8; 64];
+        let _ = handle.read_bulk(0x82, &mut status, Duration::from_millis(20));
+
+        if i % 64 == 0 || i + 1 == data.len().div_ceil(64) {
+            println!("  Written {}/{} bytes", (i + 1) * 64, data.len());
+        }
+    }
+
+    println!("  Save write complete: {} bytes to {}", data.len(), input.display());
+    Ok(())
+}
+
+fn cmd_rom_write(input: PathBuf, byte_addr: u32, delay_ms: u64, no_erase: bool, write_cmd: u8, erase_cmd: u8) -> Result<()> {
+    let data = fs::read(&input)
+        .with_context(|| format!("reading ROM file: {}", input.display()))?;
+    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+    let handle = device.open()?;
+    let config = device.active_config_descriptor()?;
+    for iface in config.interfaces() {
+        for iface_desc in iface.descriptors() {
+            let _ = handle.claim_interface(iface_desc.interface_number());
+        }
+    }
+    for ep in 0x01u8..=0x07u8 { let _ = handle.clear_halt(ep); let _ = handle.clear_halt(ep | 0x80); }
+
+    let cmd_ep = 0x04;
+    let data_ep = 0x82;
+    let delay = Duration::from_millis(delay_ms);
+
+    println!("Writing {} bytes to ROM at offset 0x{:X}", data.len(), byte_addr);
+    if !no_erase {
+        println!("  NOTICE: ROM write needs confirmation from USB captures.");
+        println!("  Attempting sector erase + program with cmd=0x{:02X}, erase=0x{:02X}", write_cmd, erase_cmd);
+    }
+
+    // Reset flash to known state
+    let seq: [(u8, u16); 4] = [(0xAA, 0xAAAA), (0x55, 0x5554), (0xF0, 0xAAAA), (0xFF, 0)];
+    for (cb, a) in &seq {
+        let da = a / 2;
+        let c = [*cb, (da & 0xFF) as u8, ((da >> 8) & 0xFF) as u8, 0x00];
+        let _ = handle.write_bulk(cmd_ep, &c, Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    if !no_erase {
+        // Erase sectors (64KB each for NOR flash)
+        let sector_size = 65536u32;
+        let start_sector = byte_addr / sector_size;
+        let end_sector = (byte_addr + data.len() as u32).div_ceil(sector_size);
+        println!("  Erasing sectors {start_sector}..{end_sector}...");
+        for sector in start_sector..end_sector {
+            let sec_addr = sector * sector_size;
+            let word_addr = sec_addr / 2;
+            let erase = [erase_cmd, (word_addr & 0xFF) as u8, ((word_addr >> 8) & 0xFF) as u8, ((word_addr >> 16) & 0xFF) as u8];
+            handle.write_bulk(cmd_ep, &erase, TIMEOUT)?;
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = handle.read_bulk(data_ep, &mut [0u8; 64], Duration::from_secs(1));
+        }
+    }
+
+    // Write 64-byte chunks
+    for (i, chunk) in data.chunks(64).enumerate() {
+        let addr = byte_addr + (i * 64) as u32;
+        let word_addr = addr / 2;
+        let bank = (word_addr >> 16) as u8;
+
+        let mut cmd = vec![write_cmd,
+            (word_addr & 0xFF) as u8,
+            ((word_addr >> 8) & 0xFF) as u8,
+            bank];
+        cmd.extend_from_slice(chunk);
+        handle.write_bulk(cmd_ep, &cmd, TIMEOUT)?;
+        std::thread::sleep(delay);
+
+        // Optional: read back verify
+        let _ = handle.read_bulk(data_ep, &mut [0u8; 64], Duration::from_millis(50));
+
+        if i % 256 == 0 || i + 1 == data.len().div_ceil(64) {
+            println!("  Written {}/{} bytes", (i + 1) * 64, data.len());
+        }
+    }
+
+    println!("  ROM write complete: {} bytes to {}", data.len(), input.display());
     Ok(())
 }
 
@@ -1053,7 +1264,7 @@ fn main() -> Result<()> {
         Commands::InitExact { table1, table2 } => cmd_init_exact(&table1, &table2),
         Commands::CartInfo => cmd_cart_info(),
         Commands::ResetCart => cmd_reset_cart(),
-            Commands::Dump { output, addr, size, delay_ms } => cmd_dump(output, addr, size, delay_ms),
+            Commands::Dump { output, addr, size, delay_ms, fast } => cmd_dump(output, addr, size, delay_ms, fast),
         Commands::CartRead { addr, count, cmd, bank, byte3_bank } => cmd_cart_read(addr, count, cmd, bank, byte3_bank),
         Commands::SaveRead { addr, count, save_type, output } => cmd_save_read(addr, count, save_type, output),
         Commands::Reset => cmd_reset(),
@@ -1062,6 +1273,8 @@ fn main() -> Result<()> {
         Commands::RamWrite { address, value } => cmd_ram_write(address, value),
         Commands::PassiveRead => cmd_passive_read(),
         Commands::BulkTest => cmd_bulk_test(),
+        Commands::SaveWrite { input, addr, save_type, write_cmd, erase_cmd } => cmd_save_write(input, addr, save_type, write_cmd, erase_cmd),
+        Commands::RomWrite { input, addr, delay_ms, no_erase, write_cmd, erase_cmd } => cmd_rom_write(input, addr, delay_ms, no_erase, write_cmd, erase_cmd),
         Commands::Ep0VendorRead { addr, count, bank } => cmd_ep0_vendor_read(addr, count, bank),
         Commands::FpgaWrite { addr, value } => cmd_fpga_write(addr, value),
     }

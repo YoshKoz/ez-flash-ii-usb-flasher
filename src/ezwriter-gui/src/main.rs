@@ -599,7 +599,7 @@ fn cmd_probe_ep0_rom() -> eframe::Result<()> {
     for &(off, label) in offsets {
         match session.read_rom_chunk(off) {
             Ok(chunk) => {
-                let same = ep4_ref.as_ref().map_or(false, |r| r == &chunk);
+                let same = ep4_ref.as_ref() == Some(&chunk);
                 eprintln!(
                     "  0x{:07X} ({label:6}): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {}",
                     off,
@@ -619,7 +619,7 @@ fn cmd_probe_ep0_rom() -> eframe::Result<()> {
     for &(off, label) in offsets {
         match session.read_rom_chunk_ep0(off) {
             Ok(chunk) => {
-                let same_as_0 = ep0_ref.as_ref().map_or(false, |r| r == &chunk);
+                let same_as_0 = ep0_ref.as_ref() == Some(&chunk);
                 eprintln!(
                     "  0x{:07X} ({label:6}): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {}",
                     off,
@@ -794,7 +794,7 @@ fn cmd_probe_ep0_repeat(addr: u32) -> eframe::Result<()> {
     for i in 0..4 {
         match session.read_rom_chunk_ep0(addr) {
             Ok(chunk) => {
-                let same = chunks.last().map_or(false, |prev: &[u8; 64]| prev == &chunk);
+                let same = chunks.last() == Some(&chunk);
                 eprintln!(
                     "  read {i}: {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}  {}",
                     chunk[0], chunk[1], chunk[2], chunk[3],

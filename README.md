@@ -2,7 +2,8 @@
 
 # EZ-Writer II / EZ-Flash II USB Flasher
 
-Modern open-source replacement for the Windows XP-era EZ-Writer flasher.  
+Dump GBA ROMs and save files from Game Boy Advance cartridges on modern Windows (10/11), Linux, and macOS.  
+Open-source replacement for the Windows XP-era EZ-Writer II (EZ Flash II) USB cartridge reader/writer.  
 **No kernel drivers. Just WinUSB + libusb.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
@@ -43,8 +44,8 @@ ezwriter-cli save-read 0 2048 --output myrom.sav
 | Save read | Done |
 | Cartridge header parse | Done |
 | GUI (egui, 5 tabs) | Done |
-| Save write | In progress |
-| ROM write | In progress |
+| Save write | Done |
+| ROM write | Experimental |
 
 ---
 
@@ -81,9 +82,13 @@ Full protocol reference: [docs/protocol_notes.md](docs/protocol_notes.md)
 
 ```
 ezwriter-reverse/
+├── analyze_driver.py       ─ Driver binary analysis (root)
+├── disasm_ezwinit.py       ─ ezwinit.sys disassembly (root)
+├── disasm_full.py          ─ Full firmware disassembly (root)
+├── disasm_fwloader.py      ─ Firmware loader disassembly (root)
 ├── src/ezwriter-cli/      ─ Rust CLI (libusb, clap)
 ├── src/ezwriter-gui/      ─ Rust GUI (egui/eframe)
-├── src/*.py               ─ RE/prototyping scripts
+├── src/*.py               ─ RE/prototyping scripts (src/)
 ├── docs/                  ─ Protocol notes, driver analysis
 ├── driver/winusb-inf/     ─ WinUSB INF + install scripts
 ├── original/              ─ EZClient v3.26 (reference only)
@@ -113,9 +118,10 @@ See [SAFETY.md](SAFETY.md).
 
 - [x] Device detection, firmware download, ROM dump, save read
 - [x] Cartridge header parse, GUI, WinUSB driver
-- [ ] Save write, ROM write
-- [ ] Speed optimization (pipelined reads)
-- [ ] Write Save tab in GUI
+- [x] Save write
+- [x] ROM write (experimental — needs protocol confirmation)
+- [x] Speed optimization (pipelined reads, `--fast` flag)
+- [x] Write Save tab in GUI
 
 ---
 
