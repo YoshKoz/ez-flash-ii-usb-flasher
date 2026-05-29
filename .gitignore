@@ -1,0 +1,11 @@
+target/
+*.bin
+*.ihx
+captures/
+original/
+original_backup/
+!tusbez.bin
+!loader_table1.bin
+!loader_table2.bin
+!an2131_fw_driver.bin
+!an2131_fw_v2.bin

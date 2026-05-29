@@ -1,0 +1,61 @@
+;=============================================================================
+;  EZ-Writer II / EZ-Flash II USB Writer - WinUSB driver
+;  For Windows 10/11 x64 using WinUSB.sys (inbox driver)
+;
+;  Replaces the original kernel drivers (ezwinit.sys, ezwriter.sys) with the
+;  Microsoft inbox WinUSB.sys driver. Works with libusb through WinUSB API.
+;
+;  This INF covers the EZ-USB bootloader mode (VID 0547 PID 2131) so that
+;  libusb can download the 8051 firmware. After firmware download, the
+;  device re-enumerates as VID 0548 PID 1005 (also covered here).
+;=============================================================================
+
+[Version]
+Signature = "$Windows NT$"
+Class = USBDevice
+ClassGuid = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider = "EZ-Writer Open Source Project"
+DriverVer = 08/01/2024,1.0.0.0
+CatalogFile = ezwriter-winusb.cat
+; This INF is designed for WinUSB only - no kernel driver
+
+[Manufacturer]
+%ManufacturerName% = EZWriter_WinUSB, NTamd64
+
+; Bootloader mode (Cypress EZ-USB AN2131)
+[EZWriter_WinUSB.NTamd64]
+%DeviceDesc_Bootloader% = USB_Install, USB\VID_0547&PID_2131
+
+; Active mode (after firmware download)
+%DeviceDesc_Active% = USB_Install, USB\VID_0548&PID_1005
+
+;=============================================================================
+; Installation for WinUSB
+;=============================================================================
+
+[USB_Install]
+Include = winusb.inf
+Needs = WINUSB.NT
+
+[USB_Install.Services]
+Include = winusb.inf
+Needs = WINUSB.NT.Services
+
+;=============================================================================
+; Device properties (optional but nice)
+;=============================================================================
+
+[USB_Install.HW]
+AddReg = USB_Install.AddReg
+
+[USB_Install.AddReg]
+HKR,,DeviceInterfaceGUIDs,0x10000,"{B4618C01-99B1-4EA7-94B2-2813527D4569}"
+
+;=============================================================================
+; Strings
+;=============================================================================
+
+[Strings]
+ManufacturerName = "EZ-Writer Open Source"
+DeviceDesc_Bootloader = "EZ-Writer II (Bootloader Mode) - WinUSB"
+DeviceDesc_Active = "EZ-Writer II (Active Mode) - WinUSB"
