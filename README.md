@@ -93,22 +93,26 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant H as Host PC
-    participant D as EZ-Writer (0547:2131)
-    participant F as 8051 Firmware
-    participant C as GBA Cartridge
+    participant D as EZ-Writer
+    participant C as GBA Cart
 
+    rect rgb(30, 30, 50)
     Note over H,D: Phase 1 — Bootloader mode
-    H->>D: Plug in (VID 0x0547, PID 0x2131)
-    H->>D: Vendor 0xA0: hold CPU reset (CPUCS = 0x01)
-    H->>D: Vendor 0xA0: download tusbez.bin (5584 bytes)
-    H->>D: Vendor 0xA0: start CPU (CPUCS = 0x00)
-    D->>F: Boot firmware
+    H->>D: Plug in (0547:2131)
+    H->>D: Vendor 0xA0: hold CPU reset
+    H->>D: Vendor 0xA0: download tusbez.bin
+    H->>D: Vendor 0xA0: start CPU
+    Note over D: 8051 boots firmware
+    end
+
+    rect rgb(40, 20, 50)
     Note over H,D: Phase 2 — Active mode
-    D-->>H: Re-enumerate (VID 0x0548, PID 0x1005)
-    H->>D: Bulk EP2 OUT: cartridge commands
-    D->>C: Translate to GBA bus protocol
+    D-->>H: Re-enumerate (0548:1005)
+    H->>D: Bulk EP2 OUT: cart commands
+    D->>C: GBA bus protocol
     C-->>D: ROM / save data
-    D-->>H: Bulk EP6 IN: response data
+    D-->>H: Bulk EP6 IN: response
+    end
 ```
 
 ### Data Flow
