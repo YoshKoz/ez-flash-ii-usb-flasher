@@ -7,7 +7,7 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-lightgrey)](https://github.com/YoshKoz/ezwriter-reverse)
-[![Rust](https://img.shields.io/badge/Rust-2024-edition-orange)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange)](https://www.rust-lang.org/)
 [![GitHub last commit](https://img.shields.io/github/last-commit/YoshKoz/ezwriter-reverse)](https://github.com/YoshKoz/ezwriter-reverse/commits/master)
 
 </div>
