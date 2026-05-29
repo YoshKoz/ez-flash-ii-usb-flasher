@@ -34,6 +34,8 @@ ezwriter-cli dump myrom                # → myrom.gba
 ezwriter-cli save-read 0 2048 --output myrom.sav
 ```
 
+`tusbez.bin` is the original 8051 firmware extracted from the EZ-Writer driver. It's uploaded to the Cypress AN2131's RAM at every connect (the chip has no persistent ROM). Included in the repo under [`src/ezwriter-cli/`](src/ezwriter-cli/).
+
 ---
 
 ## Status
