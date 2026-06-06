@@ -606,7 +606,7 @@ fn cmd_cart_info() -> Result<()> {
     }
 
     if cart_data.len() >= 0xB2 {
-        if &cart_data[4..8] == [0x24, 0xFF, 0xAE, 0x51] || &cart_data[4..8] == [0xFE, 0x7F, 0x1C, 0xEA] {
+        if cart_data[4..8] == [0x24, 0xFF, 0xAE, 0x51] || cart_data[4..8] == [0xFE, 0x7F, 0x1C, 0xEA] {
              // Basic GBA logo or branch check
         }
         let title: String = cart_data[0xA0..0xAC]
@@ -1112,9 +1112,9 @@ fn cmd_dump(
         output.display()
     );
     if fast {
-        println!("  Mode: EP4 bulk pipelined (fast, may have title/header errors)");
+        println!("  Mode: EP4 bulk pipelined (Experimental - fast, but potentially unreliable)");
     } else {
-        println!("  Mode: EP0 control + 5 ms delay (correct addressing)");
+        println!("  Mode: EP4 bulk non-pipelined (Reliable - same as GUI)");
     }
     println!();
 

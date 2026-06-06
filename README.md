@@ -45,82 +45,45 @@ features exist for testing and recovery work, but you should back up first and r
 
 ## Quick Start
 
-### 1. Install Rust
+### Prerequisites
 
-Install Rust from <https://rustup.rs/> if `cargo` is not already available.
+- **Rust** — install from <https://rustup.rs/> if `cargo` is unavailable.
+- **USB driver (Windows only)** — use [Zadig](https://zadig.akeo.ie/):
+  1. Run Zadig as Administrator.
+  2. `Options → List All Devices`.
+  3. Select `EZ-Writer II` (`0547:2131` or `0548:1005`).
+  4. Choose `WinUSB`, click `Install Driver`.
+- **Linux** — may need a udev rule or root for direct USB access.
+- **macOS** — no driver needed, but grant USB permission when prompted.
 
-### 2. Install the USB Driver
-
-On Windows:
-
-1. Download Zadig from <https://zadig.akeo.ie/>.
-2. Run Zadig as Administrator.
-3. Open `Options -> List All Devices`.
-4. Select `EZ-Writer II` or the matching `0547:2131` / `0548:1005` device.
-5. Select `WinUSB`.
-6. Click `Install Driver`.
-
-Linux users may need a udev rule or root permissions for direct USB access.
-macOS users normally do not need a driver, but the app still needs USB permission.
-
-### 3. Build the CLI
+### Build everything
 
 ```console
-cd src/ezwriter-cli
-cargo build --release
+cd src/ezwriter-cli && cargo build --release && cd ../ezwriter-gui && cargo build --release
 ```
 
-### 4. Detect the Writer
-
-Linux/macOS:
+### Detect → Initialize → Dump (4 commands)
 
 ```console
+# 1. Detect
 ./target/release/ezwriter-cli list
-```
 
-Windows PowerShell:
-
-```console
-.\target\release\ezwriter-cli.exe list
-```
-
-### 5. Load Firmware
-
-If the device is in bootloader mode, upload the included 8051 firmware:
-
-Linux/macOS:
-
-```console
+# 2. Load firmware (only needed if in bootloader mode 0547:2131)
 ./target/release/ezwriter-cli firmware-download tusbez.bin
-```
 
-Windows PowerShell:
-
-```console
-.\target\release\ezwriter-cli.exe firmware-download tusbez.bin
-```
-
-`tusbez.bin` is the original 8051 firmware extracted from the EZ-Writer driver.
-It is uploaded into the Cypress AN2131 RAM on every connection. The chip has no
-persistent firmware storage in this setup, so unplugging the writer resets it.
-
-### 6. Dump a ROM or Save
-
-Linux/macOS:
-
-```console
+# 3. Identify cartridge
 ./target/release/ezwriter-cli cart-info
+
+# 4. Dump ROM + save
 ./target/release/ezwriter-cli dump mygame.gba
 ./target/release/ezwriter-cli save-read 0 2048 --output mygame.sav
 ```
 
-Windows PowerShell:
+(Windows: replace `./target/release/ezwriter-cli` with `.\target\release\ezwriter-cli.exe`)
 
-```console
-.\target\release\ezwriter-cli.exe cart-info
-.\target\release\ezwriter-cli.exe dump mygame.gba
-.\target\release\ezwriter-cli.exe save-read 0 2048 --output mygame.sav
-```
+`tusbez.bin` is the original 8051 firmware loaded into Cypress AN2131 RAM.
+The chip has no persistent storage — unplugging resets it, so firmware
+must be uploaded on every connection.
 
 ## GUI
 
@@ -215,6 +178,9 @@ Full protocol notes: [docs/protocol_notes.md](docs/protocol_notes.md)
 |-- SAFETY.md               Write-operation safety guide
 `-- RELEASE.md              Public release checklist and Reddit post draft
 ```
+
+> Originally created as `ezwriter-reverse` during reverse engineering.
+> Binaries keep the `ezwriter-` prefix — the hardware is commonly called EZ-Writer II.
 
 ## Legal
 
