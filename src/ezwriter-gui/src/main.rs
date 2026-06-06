@@ -1,7 +1,7 @@
 mod app;
 mod device;
 
-pub const BUILD_STAMP: &str = "EP0-SEQ-DIAG-003";
+pub const BUILD_STAMP: &str = "0.1.0";
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -61,7 +61,9 @@ fn main() -> eframe::Result<()> {
             }
             "--dump-ep0-at" => {
                 if args.len() < 5 {
-                    eprintln!("usage: ezwriter-gui.exe --dump-ep0-at <hex_start> <hex_size> <output_path>");
+                    eprintln!(
+                        "usage: ezwriter-gui.exe --dump-ep0-at <hex_start> <hex_size> <output_path>"
+                    );
                     eprintln!("  e.g. --dump-ep0-at 400000 400000 rom.gba");
                     std::process::exit(1);
                 }
@@ -78,14 +80,11 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([640.0, 480.0])
-            .with_title(format!(
-                "EZ-Writer II / EZ-Flash II Flasher [{}]",
-                BUILD_STAMP
-            )),
+            .with_title(format!("EZ-Flash II USB Flasher {}", BUILD_STAMP)),
         ..Default::default()
     };
     eframe::run_native(
-        &format!("EZ-Writer II [{}]", BUILD_STAMP),
+        &format!("EZ-Flash II USB Flasher {}", BUILD_STAMP),
         options,
         Box::new(|_cc| Ok(Box::new(app::EzWriterApp::default()))),
     )
@@ -603,11 +602,19 @@ fn cmd_probe_ep0_rom() -> eframe::Result<()> {
                 eprintln!(
                     "  0x{:07X} ({label:6}): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {}",
                     off,
-                    chunk[0], chunk[1], chunk[2], chunk[3],
-                    chunk[4], chunk[5], chunk[6], chunk[7],
+                    chunk[0],
+                    chunk[1],
+                    chunk[2],
+                    chunk[3],
+                    chunk[4],
+                    chunk[5],
+                    chunk[6],
+                    chunk[7],
                     if same { "SAME as 0x000000" } else { "" }
                 );
-                if ep4_ref.is_none() { ep4_ref = Some(chunk); }
+                if ep4_ref.is_none() {
+                    ep4_ref = Some(chunk);
+                }
             }
             Err(e) => eprintln!("  0x{:07X} ({label}): ERROR: {e}", off),
         }
@@ -623,11 +630,23 @@ fn cmd_probe_ep0_rom() -> eframe::Result<()> {
                 eprintln!(
                     "  0x{:07X} ({label:6}): {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {}",
                     off,
-                    chunk[0], chunk[1], chunk[2], chunk[3],
-                    chunk[4], chunk[5], chunk[6], chunk[7],
-                    if same_as_0 { "SAME as 0x000000" } else { "DIFFERENT" }
+                    chunk[0],
+                    chunk[1],
+                    chunk[2],
+                    chunk[3],
+                    chunk[4],
+                    chunk[5],
+                    chunk[6],
+                    chunk[7],
+                    if same_as_0 {
+                        "SAME as 0x000000"
+                    } else {
+                        "DIFFERENT"
+                    }
                 );
-                if ep0_ref.is_none() { ep0_ref = Some(chunk); }
+                if ep0_ref.is_none() {
+                    ep0_ref = Some(chunk);
+                }
             }
             Err(e) => eprintln!("  0x{:07X} ({label}): ERROR: {e}", off),
         }
@@ -680,7 +699,10 @@ fn cmd_dump_ep0(path: &str) -> eframe::Result<()> {
         Ok(()) => {
             eprintln!("[dump-ep0] SUCCESS");
             let flen = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            eprintln!("[dump-ep0] Final file: {} bytes (expected {rom_size})", flen);
+            eprintln!(
+                "[dump-ep0] Final file: {} bytes (expected {rom_size})",
+                flen
+            );
             Ok(())
         }
         Err(e) => {
@@ -717,31 +739,66 @@ fn cmd_probe_ep0_header(flash_offset: u32) -> eframe::Result<()> {
     let rom_ver = header[0xBC];
     let checksum = header[0xBD];
 
-    eprintln!("[probe-ep0-header] GBA magic: {} ({:02x} {:02x} {:02x} {:02x})",
+    eprintln!(
+        "[probe-ep0-header] GBA magic: {} ({:02x} {:02x} {:02x} {:02x})",
         if magic_ok { "VALID" } else { "INVALID" },
-        header[4], header[5], header[6], header[7]);
-    eprintln!("[probe-ep0-header] Title    : {:?}", title.trim_end_matches('\0'));
+        header[4],
+        header[5],
+        header[6],
+        header[7]
+    );
+    eprintln!(
+        "[probe-ep0-header] Title    : {:?}",
+        title.trim_end_matches('\0')
+    );
     eprintln!("[probe-ep0-header] Game code: {:?}", code);
     eprintln!("[probe-ep0-header] Maker    : {:?}", maker);
     eprintln!("[probe-ep0-header] ROM ver  : 0x{:02X}", rom_ver);
     eprintln!("[probe-ep0-header] Checksum : 0x{:02X}", checksum);
 
     eprintln!("[probe-ep0-header] First 16 bytes:");
-    eprintln!("  {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}",
-        header[0], header[1], header[2], header[3],
-        header[4], header[5], header[6], header[7],
-        header[8], header[9], header[10], header[11],
-        header[12], header[13], header[14], header[15]);
+    eprintln!(
+        "  {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}",
+        header[0],
+        header[1],
+        header[2],
+        header[3],
+        header[4],
+        header[5],
+        header[6],
+        header[7],
+        header[8],
+        header[9],
+        header[10],
+        header[11],
+        header[12],
+        header[13],
+        header[14],
+        header[15]
+    );
 
     // Look up in game DB
-    if let Some(entry) = device::GAME_DB.iter().find(|e| e.code == code.trim_end_matches('\0')) {
-        eprintln!("[probe-ep0-header] DB match  : {} / save={} / rom_size=0x{:X}",
-            entry.title, entry.save_type, entry.rom_size);
-        eprintln!("[probe-ep0-header] Dump cmd  : --dump-ep0-at {:X} {:X} <output.gba>",
-            flash_offset, entry.rom_size);
+    if let Some(entry) = device::GAME_DB
+        .iter()
+        .find(|e| e.code == code.trim_end_matches('\0'))
+    {
+        eprintln!(
+            "[probe-ep0-header] DB match  : {} / save={} / rom_size=0x{:X}",
+            entry.title, entry.save_type, entry.rom_size
+        );
+        eprintln!(
+            "[probe-ep0-header] Dump cmd  : --dump-ep0-at {:X} {:X} <output.gba>",
+            flash_offset, entry.rom_size
+        );
     } else {
-        eprintln!("[probe-ep0-header] DB match  : none (unknown game code {:?})", code);
-        eprintln!("[probe-ep0-header] Dump hint : --dump-ep0-at {:X} <size_hex> <output.gba>", flash_offset);
+        eprintln!(
+            "[probe-ep0-header] DB match  : none (unknown game code {:?})",
+            code
+        );
+        eprintln!(
+            "[probe-ep0-header] Dump hint : --dump-ep0-at {:X} <size_hex> <output.gba>",
+            flash_offset
+        );
     }
 
     Ok(())
@@ -750,7 +807,10 @@ fn cmd_probe_ep0_header(flash_offset: u32) -> eframe::Result<()> {
 /// Dump a specific byte range from EP0 flash space to a file.
 fn cmd_dump_ep0_at(start: u32, size: u64, path: &str) -> eframe::Result<()> {
     eprintln!("[dump-ep0-at] build: {}", BUILD_STAMP);
-    eprintln!("[dump-ep0-at] start=0x{:06X} size=0x{:X} output={}", start, size, path);
+    eprintln!(
+        "[dump-ep0-at] start=0x{:06X} size=0x{:X} output={}",
+        start, size, path
+    );
 
     let output = std::path::Path::new(path);
     let partial = device::partial_path(output);
@@ -768,7 +828,10 @@ fn cmd_dump_ep0_at(start: u32, size: u64, path: &str) -> eframe::Result<()> {
         Ok(()) => {
             eprintln!("[dump-ep0-at] SUCCESS");
             let flen = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            eprintln!("[dump-ep0-at] Final file: {} bytes (expected {})", flen, size);
+            eprintln!(
+                "[dump-ep0-at] Final file: {} bytes (expected {})",
+                flen, size
+            );
             Ok(())
         }
         Err(e) => {
@@ -797,9 +860,21 @@ fn cmd_probe_ep0_repeat(addr: u32) -> eframe::Result<()> {
                 let same = chunks.last() == Some(&chunk);
                 eprintln!(
                     "  read {i}: {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}  {}",
-                    chunk[0], chunk[1], chunk[2], chunk[3],
-                    chunk[4], chunk[5], chunk[6], chunk[7],
-                    if i == 0 { "baseline" } else if same { "SAME as prev" } else { "DIFFERENT from prev" }
+                    chunk[0],
+                    chunk[1],
+                    chunk[2],
+                    chunk[3],
+                    chunk[4],
+                    chunk[5],
+                    chunk[6],
+                    chunk[7],
+                    if i == 0 {
+                        "baseline"
+                    } else if same {
+                        "SAME as prev"
+                    } else {
+                        "DIFFERENT from prev"
+                    }
                 );
                 chunks.push(chunk);
             }
@@ -835,10 +910,21 @@ fn cmd_scan_ep0_from_zero() -> eframe::Result<()> {
                 let has_magic = chunk[4..8] == gba_magic;
                 eprintln!(
                     "  chunk {:3} (addr 0x{:06X}): {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x}  {}",
-                    i, byte_addr,
-                    chunk[0], chunk[1], chunk[2], chunk[3],
-                    chunk[4], chunk[5], chunk[6], chunk[7],
-                    if has_magic { "<-- GBA magic found!" } else { "" }
+                    i,
+                    byte_addr,
+                    chunk[0],
+                    chunk[1],
+                    chunk[2],
+                    chunk[3],
+                    chunk[4],
+                    chunk[5],
+                    chunk[6],
+                    chunk[7],
+                    if has_magic {
+                        "<-- GBA magic found!"
+                    } else {
+                        ""
+                    }
                 );
                 if has_magic && found_offset.is_none() {
                     found_offset = Some(byte_addr);
@@ -850,12 +936,18 @@ fn cmd_scan_ep0_from_zero() -> eframe::Result<()> {
 
     match found_offset {
         Some(off) => {
-            eprintln!("[scan-ep0-from-zero] GBA header found at scan offset 0x{:06X} (chunk {})", off, off / 64);
+            eprintln!(
+                "[scan-ep0-from-zero] GBA header found at scan offset 0x{:06X} (chunk {})",
+                off,
+                off / 64
+            );
             eprintln!("[scan-ep0-from-zero] Run: --probe-ep0-header {:X}", off);
         }
         None => {
             eprintln!("[scan-ep0-from-zero] GBA magic NOT found in first 2048 bytes");
-            eprintln!("[scan-ep0-from-zero] Try --probe-ep0-repeat to check if reads are sequential");
+            eprintln!(
+                "[scan-ep0-from-zero] Try --probe-ep0-repeat to check if reads are sequential"
+            );
         }
     }
     Ok(())
