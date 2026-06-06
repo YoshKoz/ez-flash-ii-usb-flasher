@@ -1,199 +1,230 @@
 <div align="center">
 
-# EZ-Writer II / EZ-Flash II USB Flasher
+# EZ-Flash II USB Flasher
 
-Dump GBA ROMs and save files from Game Boy Advance cartridges on modern Windows (10/11), Linux, and macOS.  
-Open-source replacement for the Windows XP-era EZ-Writer II (EZ Flash II) USB cartridge reader/writer.  
-**No kernel drivers. Just WinUSB + libusb.**
+Modern open-source tools for the EZ-Writer II / EZ-Flash II USB GBA cartridge flasher.
+
+Dump Game Boy Advance ROMs, back up saves, inspect cartridge headers, and restore saves
+from Windows 10/11, Linux, or macOS without the original Windows XP kernel drivers.
+
+**No custom kernel driver. Uses WinUSB + libusb.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-lightgrey)]()
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-orange)](https://www.rust-lang.org/)
-[![GitHub last commit](https://img.shields.io/github/last-commit/YoshKoz/ezwriter-reverse)]()
+[![Platforms](https://img.shields.io/badge/Platforms-Windows%2010%2F11%20%7C%20Linux%20%7C%20macOS-lightgrey)]()
 
 </div>
 
 ---
 
-## Quick Start
+## What This Is
 
-**1. Install driver** — [Download Zadig](https://zadig.akeo.ie/) → Run as Admin → Options → List All Devices → select `EZ-Writer II` → `WinUSB` → Install Driver.
+The original EZ-Writer II software only works easily on old Windows XP-era setups.
+This project replaces the old USB driver path with a Rust CLI and GUI that talk to
+the hardware through libusb.
 
-**2. Build**
+It supports the EZ-Writer II device that starts as `0547:2131` and, after firmware
+upload, re-enumerates as `0548:1005`.
 
-```bash
-cd src\ezwriter-cli
-cargo build --release
-```
-
-**3. Dump a cartridge**
-
-```bash
-ezwriter-cli firmware-download src\ezwriter-cli\tusbez.bin
-ezwriter-cli dump myrom                # → myrom.gba
-ezwriter-cli save-read 0 2048 --output myrom.sav
-```
-
-`tusbez.bin` is the original 8051 firmware extracted from the EZ-Writer driver. It's uploaded to the Cypress AN2131's RAM at every connect (the chip has no persistent ROM). Included in the repo under [`src/ezwriter-cli/`](src/ezwriter-cli/).
-
-The **Cypress AN2131Q** (EZ-USB FX family) is a USB microcontroller with an 8051 core running at 48 MHz. It has no internal flash — code loads from the host into its 8 KB RAM over the USB control endpoint. This is why every EZ-Writer needs `tusbez.bin` sent before use.
-
----
-
-## Status
+## Current Status
 
 | Feature | Status |
 |---------|--------|
-| ROM dump | Done |
-| Save read | Done |
-| Cartridge header parse | Done |
-| GUI (egui, 5 tabs) | Done |
-| Save write | Done |
-| ROM write | Experimental |
+| Device detection | Working |
+| Firmware upload to AN2131 RAM | Working |
+| Cartridge header read | Working |
+| ROM dump | Working |
+| Save read | Working |
+| Save write | Working, use backups |
+| GUI | Working |
+| ROM write / erase | Experimental, high risk |
 
----
+Read-only actions are the safest and are the intended public release path. Write
+features exist for testing and recovery work, but you should back up first and read
+[SAFETY.md](SAFETY.md).
+
+## Quick Start
+
+### 1. Install Rust
+
+Install Rust from <https://rustup.rs/> if `cargo` is not already available.
+
+### 2. Install the USB Driver
+
+On Windows:
+
+1. Download Zadig from <https://zadig.akeo.ie/>.
+2. Run Zadig as Administrator.
+3. Open `Options -> List All Devices`.
+4. Select `EZ-Writer II` or the matching `0547:2131` / `0548:1005` device.
+5. Select `WinUSB`.
+6. Click `Install Driver`.
+
+Linux users may need a udev rule or root permissions for direct USB access.
+macOS users normally do not need a driver, but the app still needs USB permission.
+
+### 3. Build the CLI
+
+```console
+cd src/ezwriter-cli
+cargo build --release
+```
+
+### 4. Detect the Writer
+
+Linux/macOS:
+
+```console
+./target/release/ezwriter-cli list
+```
+
+Windows PowerShell:
+
+```console
+.\target\release\ezwriter-cli.exe list
+```
+
+### 5. Load Firmware
+
+If the device is in bootloader mode, upload the included 8051 firmware:
+
+Linux/macOS:
+
+```console
+./target/release/ezwriter-cli firmware-download tusbez.bin
+```
+
+Windows PowerShell:
+
+```console
+.\target\release\ezwriter-cli.exe firmware-download tusbez.bin
+```
+
+`tusbez.bin` is the original 8051 firmware extracted from the EZ-Writer driver.
+It is uploaded into the Cypress AN2131 RAM on every connection. The chip has no
+persistent firmware storage in this setup, so unplugging the writer resets it.
+
+### 6. Dump a ROM or Save
+
+Linux/macOS:
+
+```console
+./target/release/ezwriter-cli cart-info
+./target/release/ezwriter-cli dump mygame.gba
+./target/release/ezwriter-cli save-read 0 2048 --output mygame.sav
+```
+
+Windows PowerShell:
+
+```console
+.\target\release\ezwriter-cli.exe cart-info
+.\target\release\ezwriter-cli.exe dump mygame.gba
+.\target\release\ezwriter-cli.exe save-read 0 2048 --output mygame.sav
+```
 
 ## GUI
 
-```bash
-cd src\ezwriter-gui
+```console
+cd src/ezwriter-gui
 cargo build --release
-.\target\release\ezwriter-gui.exe
 ```
 
-Keep `loader_table1.bin` and `loader_table2.bin` next to the `.exe`.
+Windows:
 
-Tabs: Status · Cart Info · Read ROM · Read Save · Write Save
+```console
+target\release\ezwriter-gui.exe
+```
 
----
+Linux/macOS:
+
+```console
+./target/release/ezwriter-gui
+```
+
+If you launch the GUI from `src/ezwriter-gui`, the loader files are already in
+the current directory. If you copy or double-click the executable elsewhere, copy
+`loader_table1.bin` and `loader_table2.bin` next to it first.
+
+The GUI has five tabs:
+
+| Tab | Purpose |
+|-----|---------|
+| Status | Detect writer and initialize firmware |
+| Cart Info | Read title, game code, save type, and ROM size |
+| Read ROM | Dump a cartridge ROM to `.gba` |
+| Read Save | Dump save data to `.sav` |
+| Write Save | Restore save data after backup |
+
+## Safety Rules
+
+- Dump the ROM before writing anything.
+- Dump the save before writing anything.
+- Use short, reliable USB cables.
+- Do not interrupt write operations.
+- Treat `write-rom` and `erase` as experimental and high risk.
+
+See [SAFETY.md](SAFETY.md) for the full checklist.
 
 ## How It Works
 
-### System Architecture
-
 ```mermaid
 flowchart LR
-    PC["Your PC<br/>(ezwriter-cli / ezwriter-gui)"]
-    USB["USB bus<br/>(libusb + WinUSB)"]
-    MCU["Cypress AN2131Q<br/>8051 CPU @ 48 MHz"]
-    CART["EZ-Flash II<br/>GBA Cartridge"]
+    PC["PC<br/>ezwriter-cli / ezwriter-gui"]
+    USB["USB<br/>libusb + WinUSB"]
+    MCU["Cypress AN2131Q<br/>8051 @ 48 MHz"]
+    CART["EZ-Flash II<br/>GBA cartridge"]
 
     PC <--> USB
-    USB <-->|"EP0 (control)<br/>EP2 (bulk OUT)<br/>EP6 (bulk IN)"| MCU
-    MCU <-->|"GPIO / parallel bus"| CART
-
-    style PC fill:#1a1a2e,color:#fff,stroke:#e94560
-    style USB fill:#16213e,color:#fff,stroke:#0f3460
-    style MCU fill:#0f3460,color:#fff,stroke:#e94560
-    style CART fill:#533483,color:#fff,stroke:#e94560
+    USB <-->|"EP0 control<br/>EP2 bulk OUT<br/>EP6 bulk IN"| MCU
+    MCU <-->|"parallel cart bus"| CART
 ```
 
-### Boot Sequence
+Boot sequence:
 
 ```mermaid
 sequenceDiagram
     participant H as Host PC
-    participant D as EZ-Writer
-    participant C as GBA Cart
+    participant D as EZ-Writer II
+    participant C as GBA cart
 
-    rect rgb(30, 30, 50)
-    Note over H,D: Phase 1 — Bootloader mode
-    H->>D: Plug in (0547:2131)
+    H->>D: Plug in, bootloader mode 0547:2131
     H->>D: Vendor 0xA0: hold CPU reset
-    H->>D: Vendor 0xA0: download tusbez.bin
+    H->>D: Vendor 0xA0: upload tusbez.bin
     H->>D: Vendor 0xA0: start CPU
-    Note over D: 8051 boots firmware
-    end
-
-    rect rgb(40, 20, 50)
-    Note over H,D: Phase 2 — Active mode
-    D-->>H: Re-enumerate (0548:1005)
-    H->>D: Bulk EP2 OUT: cart commands
-    D->>C: GBA bus protocol
+    D-->>H: Re-enumerates as 0548:1005
+    H->>D: Bulk commands
+    D->>C: Cartridge bus operations
     C-->>D: ROM / save data
-    D-->>H: Bulk EP6 IN: response
-    end
+    D-->>H: Bulk responses
 ```
 
-### Data Flow
+The old Windows driver mostly wrapped USB transfers. This project sends those
+transfers directly with libusb through WinUSB or the platform USB stack.
 
+Full protocol notes: [docs/protocol_notes.md](docs/protocol_notes.md)
+
+## Project Layout
+
+```text
+.
+|-- src/ezwriter-cli/       Rust CLI
+|-- src/ezwriter-gui/       Rust GUI
+|-- src/*.py                Reverse-engineering probes and experiments
+|-- docs/                   Protocol notes and original driver analysis
+|-- driver/winusb-inf/      Optional WinUSB INF files
+|-- SAFETY.md               Write-operation safety guide
+`-- RELEASE.md              Public release checklist and Reddit post draft
 ```
-┌──────────────────┐  ┌────────────────────┐  ┌────────────────────┐
-│    Your App      │  │  EZ-USB AN2131Q    │  │  EZ-Flash II       │
-│  (CLI / GUI)     │  │  8051 firmware     │  │  GBA Cartridge     │
-│  libusb + WinUSB │  │  tusbez.bin        │  │  NOR flash + SRAM  │
-└──────────────────┘  └────────────────────┘  └────────────────────┘
-         │                                         │
-         └──────── USB (EP0/EP2/EP6) ──────────────┘
-                              │
-                        GPIO / parallel bus
-                              │
-                              ▼
-                     Cartridge operations
-```
-
-**Why not kernel driver?** Original drivers are unsigned x32-only (won't load on modern Windows) and just wrap USB bulk IOCTLs anyway. WinUSB + libusb does the same thing cleanly.
-
-Full protocol reference: [docs/protocol_notes.md](docs/protocol_notes.md)
-
-<details>
-<summary><b>Project structure</b></summary>
-
-```
-ezwriter-reverse/
-├── analyze_driver.py       ─ Driver binary analysis (root)
-├── disasm_ezwinit.py       ─ ezwinit.sys disassembly (root)
-├── disasm_full.py          ─ Full firmware disassembly (root)
-├── disasm_fwloader.py      ─ Firmware loader disassembly (root)
-├── src/ezwriter-cli/      ─ Rust CLI (libusb, clap)
-├── src/ezwriter-gui/      ─ Rust GUI (egui/eframe)
-├── src/*.py               ─ RE/prototyping scripts (src/)
-├── docs/                  ─ Protocol notes, driver analysis
-├── driver/winusb-inf/     ─ WinUSB INF + install scripts
-├── original/              ─ EZClient v3.26 (reference only)
-├── original_backup/       ─ Extracted firmware + drivers
-└── captures/              ─ USB packet dumps
-```
-</details>
-
----
-
-## Safety
-
-> Write ops can brick your cart if interrupted. Always dump ROM + save first.
-
-| Operation | Risk |
-|-----------|------|
-| `list`, `info`, `cart-info`, `dump`, `save-read` | Safe (read-only) |
-| `firmware-download` | Low (RAM only) |
-| `write-save` | Medium |
-| `write-rom`, `erase` | **High** — can brick |
-
-See [SAFETY.md](SAFETY.md).
-
----
-
-## Roadmap
-
-- [x] Device detection, firmware download, ROM dump, save read
-- [x] Cartridge header parse, GUI, WinUSB driver
-- [x] Save write
-- [x] ROM write (experimental — needs protocol confirmation)
-- [x] Speed optimization (pipelined reads, `--fast` flag)
-- [x] Write Save tab in GUI
-
----
 
 ## Legal
 
-For homebrew, backing up saves from carts you own, and GBA development. **Not for piracy.**
-
----
+Use this for homebrew, preservation, personal backups, saves from cartridges you
+own, and GBA development. Do not use it for piracy.
 
 ## References
 
-[Cypress AN2131 / Infineon EZ-USB FX2LP](https://www.infineon.com/cms/en/product/usb-solutions/ez-usb-fx2lp/) ·
-[libusb](https://libusb.info/) ·
-[WinUSB](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/introduction-to-winusb-for-developers) ·
-[Zadig](https://zadig.akeo.ie/) ·
-[egui](https://github.com/emilk/egui)
+- [libusb](https://libusb.info/)
+- [WinUSB](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/introduction-to-winusb-for-developers)
+- [Zadig](https://zadig.akeo.ie/)
+- [egui](https://github.com/emilk/egui)
+- [Infineon EZ-USB FX2LP family](https://www.infineon.com/cms/en/product/usb-solutions/ez-usb-fx2lp/)

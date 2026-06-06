@@ -1,4 +1,4 @@
-# Safety Guide: EZ-Writer II Flasher
+# Safety Guide: EZ-Flash II USB Flasher
 
 ## Risk Levels
 
@@ -6,12 +6,12 @@
 |-----------|------|-------|
 | `list` | **None** | Read-only descriptor enumeration |
 | `info` | **None** | Read-only USB descriptor |
-| `firmware-download` | **Low** | RAM firmware only, resets on power cycle |
+| `firmware-download` | **Low** | RAM firmware only; unplugging resets it |
 | `identify` / `cart-info` | **Low** | Read-only command to cartridge |
 | `dump` | **Low** | Read-only ROM dump |
 | `save-read` | **Low** | Read-only save data |
-| `write-rom` | **HIGH** | Can brick cart if interrupted |
-| `write-save` | **Medium** | Save data write |
+| `write-save` | **Medium** | Save data write; back up first |
+| `write-rom` | **HIGH** | Experimental; can brick cart if interrupted |
 | `erase` | **HIGH** | Destructive - wipes cartridge |
 
 ## Recovery Options
@@ -34,16 +34,20 @@
 
 1. **Always dump ROM first**: `ezwriter-cli dump backup.gba`
 2. **Always dump save first**: `ezwriter-cli save-read 0 2048 --output backup.sav`
-3. **Verify the dump**: Check file size and first few bytes
-4. **Confirm you have a backup** before erasing or writing
+3. **Verify the dump**: check file size and confirm it is not all `00` or all `FF`
+4. **Keep the backup somewhere safe** before erasing or writing
+5. **Do not write from a USB hub** if you can plug the writer directly into the PC
 
 ## Pre-flight Checklist
 
 - [ ] Device shows in `ezwriter-cli list`
-- [ ] Firmware loaded (if using bootloader mode)
+- [ ] Firmware loaded if the device starts in bootloader mode
 - [ ] Cartridge detected by `ezwriter-cli cart-info`
-- [ ] Backup of current ROM/save exists
-- [ ] No other USB device using the same VID/PID
+- [ ] Current ROM backup exists
+- [ ] Current save backup exists
+- [ ] Backup sizes look plausible
+- [ ] No other USB device is using the same VID/PID
+- [ ] Laptop or PC will not sleep during the operation
 
 ## Windows Driver Signing Policy
 
@@ -68,13 +72,14 @@ Zadig creates signed driver catalogs automatically.
 - Submit for Microsoft signature
 - This produces a properly signed catalog file
 
-## Known Risks
+## Known Risks and Limits
 
 1. **Voltage/current**: The original writer operates at USB spec. No risk.
 2. **Short circuit**: Standard USB cable. Don't use damaged cables.
 3. **Electrostatic discharge**: Touch grounded metal before touching cart.
 4. **USB cable length**: Keep under 2m for reliable operation.
 5. **Power**: The EZ-Flash cart draws power from the writer. Don't chain hubs.
+6. **ROM write support**: Still experimental. Prefer read-only use unless you are prepared to recover.
 
 ## If Something Goes Wrong
 
