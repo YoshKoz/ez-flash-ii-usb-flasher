@@ -57,7 +57,7 @@ What works now:
 ROM writing and erase support are still experimental and risky, so I recommend treating this first public release as a preservation/read-only tool unless you already know what you are doing and have backups.
 
 Repo:
-https://github.com/YoshKoz/ezwriter-reverse
+https://github.com/YoshKoz/ez-flash-ii-usb-flasher
 
 I made this because the original hardware is still useful, but the official software and drivers are stuck in the Windows XP era. I am proud that this old device can now be used from a modern setup again.
 

@@ -8,4 +8,4 @@ description = "Command-line tool for the EZ-Flash II / EZ-Writer II USB GBA flas
 rusb = { version = "0.9", features = ["vendored"] }
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
-hex = "0.4"
+
