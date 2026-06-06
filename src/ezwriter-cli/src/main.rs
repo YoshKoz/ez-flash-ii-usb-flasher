@@ -577,11 +577,64 @@ fn cmd_cart_info() -> Result<()> {
         }
     }
 
-    println!("\nCartridge info: (not yet implemented - needs protocol RE)");
-    println!("  EP0 control transfers to identify cartridge...");
+    println!("\nReading cartridge header...");
+    let cmd_ep = 0x04;
+    let data_ep = 0x82;
+    let mut cart_data = Vec::new();
 
-    // TODO: Send identify command over EP0 control or bulk EP2/EP6
-    // This requires protocol RE from tusbez.bin firmware
+    for chunk in 0..4 {
+        let addr = chunk * 32; // word address (64 bytes / 2)
+        let cmd = [
+            0x01u8,
+            (addr & 0xFF) as u8,
+            ((addr >> 8) & 0xFF) as u8,
+            0x00,
+        ];
+        handle.write_bulk(cmd_ep, &cmd, TIMEOUT)?;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let mut buf = [0u8; 64];
+        match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
+            Ok(len) => {
+                cart_data.extend_from_slice(&buf[..len]);
+            }
+            Err(e) => {
+                println!("  [chunk {chunk}] read error: {e}");
+                break;
+            }
+        }
+    }
+
+    if cart_data.len() >= 0xB2 {
+        if &cart_data[4..8] == [0x24, 0xFF, 0xAE, 0x51] || &cart_data[4..8] == [0xFE, 0x7F, 0x1C, 0xEA] {
+             // Basic GBA logo or branch check
+        }
+        let title: String = cart_data[0xA0..0xAC]
+            .iter()
+            .take_while(|&&b| b != 0 && b.is_ascii())
+            .map(|&b| b as char)
+            .collect();
+        let code: String = cart_data[0xAC..0xB0]
+            .iter()
+            .take_while(|&&b| b != 0 && b.is_ascii())
+            .map(|&b| b as char)
+            .collect();
+        let maker: String = cart_data[0xB0..0xB2]
+            .iter()
+            .take_while(|&&b| b != 0 && b.is_ascii())
+            .map(|&b| b as char)
+            .collect();
+
+        if !title.is_empty() {
+            println!("  Title:    {title}");
+            println!("  Code:     {code}");
+            println!("  Maker:    {maker}");
+        } else {
+            println!("  No valid GBA title found in header.");
+        }
+    } else {
+        println!("  Could not read enough data for header.");
+    }
 
     Ok(())
 }
@@ -1070,7 +1123,7 @@ fn cmd_dump(
     use std::io::Write;
 
     if fast {
-        println!("  FAST pipelined mode — overlapping writes/reads");
+        println!("  FAST pipelined mode — overlapping writes/reads (Experimental)");
         // Pipeline depth 2: write next command while reading previous response
         let mut prev_buf: Option<[u8; 64]> = None;
         for chunk in 0..=chunk_count {
@@ -1116,23 +1169,26 @@ fn cmd_dump(
             }
         }
     } else {
-        // EP0 vendor control path — same as GUI; correct for full 24-bit addressing.
-        // Sends bRequest=0x01 with wValue=word_addr[15:0], wIndex=word_addr[23:16],
-        // waits ROM_READ_DELAY_MS, then reads 64 bytes from EP2 IN.
-        // Non-pipelined to avoid double-buffer interleaving issues.
+        // Reliable non-pipelined EP4 bulk protocol.
+        // Matches the behavior of `cart-read` and the GUI's small-read path.
         let mut last_pct = 0u32;
         for chunk in 0..chunk_count {
             let byte_addr = start_addr + chunk * 64;
             let word_addr = byte_addr / 2;
-            let wvalue = (word_addr & 0xFFFF) as u16;
-            let windex = ((word_addr >> 16) & 0xFF) as u16;
+            let addr_16 = (word_addr & 0xFFFF) as u16;
+            let bank = (word_addr >> 16) as u8;
 
-            handle
-                .write_control(0x40, 0x01, wvalue, windex, &[], TIMEOUT)
-                .with_context(|| {
-                    format!("EP0 ROM read at byte_addr=0x{byte_addr:06X}")
-                })?;
+            let cmd = [
+                0x01u8,
+                (addr_16 & 0xFF) as u8,
+                ((addr_16 >> 8) & 0xFF) as u8,
+                bank,
+            ];
 
+            handle.write_bulk(cmd_ep, &cmd, TIMEOUT)
+                .with_context(|| format!("EP4 ROM write at byte_addr=0x{byte_addr:06X}"))?;
+
+            // 5 ms delay for firmware to process and fill EP2 IN
             std::thread::sleep(Duration::from_millis(5));
 
             let mut buf = [0u8; 64];
