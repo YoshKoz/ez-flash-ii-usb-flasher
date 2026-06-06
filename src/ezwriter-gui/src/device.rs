@@ -458,9 +458,7 @@ impl CartSession {
                 TIMEOUT,
             )
             .with_context(|| {
-                format!(
-                    "EP0 ROM read: wa=0x{word_addr:06X} byte_addr=0x{byte_addr:06X}"
-                )
+                format!("EP0 ROM read: wa=0x{word_addr:06X} byte_addr=0x{byte_addr:06X}")
             })?;
 
         std::thread::sleep(Duration::from_millis(ROM_READ_DELAY_MS));
@@ -472,9 +470,7 @@ impl CartSession {
             .with_context(|| format!("EP2 read after EP0 cmd at byte_addr=0x{byte_addr:06X}"))?;
 
         if len != 64 {
-            bail!(
-                "short EP0-path read at 0x{byte_addr:06X}: got {len} bytes, expected 64"
-            );
+            bail!("short EP0-path read at 0x{byte_addr:06X}: got {len} bytes, expected 64");
         }
 
         Ok(buf)
@@ -775,7 +771,13 @@ pub fn dump_to_file(path: &PathBuf, data: &[u8]) -> Result<()> {
 ///   3. Write 64-byte chunks using cmd 0x03 + address + suffix + data
 pub fn write_save(data: &[u8], save_type: &str, cb: impl Fn(u64, u64)) -> Result<String> {
     let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
-    let suffix = if save_type.contains("EEPROM") { b'e' } else if save_type.contains("SRAM") { b's' } else { b'f' };
+    let suffix = if save_type.contains("EEPROM") {
+        b'e'
+    } else if save_type.contains("SRAM") {
+        b's'
+    } else {
+        b'f'
+    };
 
     // Select save type
     let select = [0x14u8, suffix, 0x00];
@@ -788,7 +790,13 @@ pub fn write_save(data: &[u8], save_type: &str, cb: impl Fn(u64, u64)) -> Result
         let sectors = (data.len() as u32).div_ceil(sector_size);
         for s in 0..sectors {
             let sec_addr = s * sector_size;
-            let erase = [0x15, (sec_addr & 0xFF) as u8, ((sec_addr >> 8) & 0xFF) as u8, ((sec_addr >> 16) & 0xFF) as u8, suffix];
+            let erase = [
+                0x15,
+                (sec_addr & 0xFF) as u8,
+                ((sec_addr >> 8) & 0xFF) as u8,
+                ((sec_addr >> 16) & 0xFF) as u8,
+                suffix,
+            ];
             let _ = handle.write_bulk(CMD_EP, &erase[..5], TIMEOUT);
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -798,11 +806,13 @@ pub fn write_save(data: &[u8], save_type: &str, cb: impl Fn(u64, u64)) -> Result
     let total = data.len() as u64;
     for (i, chunk) in data.chunks(64).enumerate() {
         let addr = (i * 64) as u32;
-        let mut cmd = vec![0x03u8,
+        let mut cmd = vec![
+            0x03u8,
             (addr & 0xFF) as u8,
             ((addr >> 8) & 0xFF) as u8,
             ((addr >> 16) & 0xFF) as u8,
-            suffix];
+            suffix,
+        ];
         cmd.extend_from_slice(chunk);
         handle.write_bulk(CMD_EP, &cmd, TIMEOUT)?;
         std::thread::sleep(Duration::from_millis(10));
