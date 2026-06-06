@@ -129,7 +129,10 @@ impl eframe::App for EzWriterApp {
                         pct * 100.0
                     );
                 }
-                BgCmd::SaveWriteProgress { bytes_read, total_bytes } => {
+                BgCmd::SaveWriteProgress {
+                    bytes_read,
+                    total_bytes,
+                } => {
                     let pct = bytes_read as f64 / total_bytes as f64;
                     self.progress_value = pct as f32;
                     self.progress = format!(
@@ -149,7 +152,7 @@ impl eframe::App for EzWriterApp {
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("EZ-Writer II FlashGBX");
+                ui.heading("EZ-Flash II USB Flasher");
                 ui.separator();
                 if ui
                     .selectable_label(matches!(self.tab, AppTab::Status), "Status")
@@ -490,21 +493,35 @@ impl EzWriterApp {
             if ui.button("[w] Write Save to Cartridge").clicked() {
                 let path = self.save_path.clone();
                 let tx = self.tx.clone();
-                let save_type = self.cart_header.as_ref().map_or("FLASH 128K".to_string(), |h| h.save_type.clone());
+                let save_type = self
+                    .cart_header
+                    .as_ref()
+                    .map_or("FLASH 128K".to_string(), |h| h.save_type.clone());
                 thread::spawn(move || {
                     let data = match std::fs::read(&path) {
                         Ok(d) => d,
-                        Err(e) => { let _ = tx.send(BgCmd::Error(e.to_string())); return; }
+                        Err(e) => {
+                            let _ = tx.send(BgCmd::Error(e.to_string()));
+                            return;
+                        }
                     };
                     let total = data.len() as u64;
                     match device::write_save(&data, &save_type, |read, tot| {
-                        let _ = tx.send(BgCmd::SaveWriteProgress { bytes_read: read, total_bytes: tot });
+                        let _ = tx.send(BgCmd::SaveWriteProgress {
+                            bytes_read: read,
+                            total_bytes: tot,
+                        });
                     }) {
                         Ok(msg) => {
-                            let _ = tx.send(BgCmd::SaveWriteProgress { bytes_read: total, total_bytes: total });
+                            let _ = tx.send(BgCmd::SaveWriteProgress {
+                                bytes_read: total,
+                                total_bytes: total,
+                            });
                             let _ = tx.send(BgCmd::Progress(msg));
                         }
-                        Err(e) => { let _ = tx.send(BgCmd::Error(e.to_string())); }
+                        Err(e) => {
+                            let _ = tx.send(BgCmd::Error(e.to_string()));
+                        }
                     }
                 });
             }

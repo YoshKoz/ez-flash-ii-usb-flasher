@@ -2,6 +2,7 @@
 name = "ezwriter-gui"
 version = "0.1.0"
 edition = "2024"
+description = "GUI for the EZ-Flash II / EZ-Writer II USB GBA flasher"
 
 [dependencies]
 eframe = { version = "0.31", features = ["default"] }
