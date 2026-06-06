@@ -1058,7 +1058,11 @@ fn cmd_dump(
         start_addr,
         output.display()
     );
-    println!("  Using byte[3] as bank for 24-bit addressing");
+    if fast {
+        println!("  Mode: EP4 bulk pipelined (fast, may have title/header errors)");
+    } else {
+        println!("  Mode: EP0 control + 5 ms delay (correct addressing)");
+    }
     println!();
 
     let mut file = fs::File::create(&output)
@@ -1112,63 +1116,41 @@ fn cmd_dump(
             }
         }
     } else {
+        // EP0 vendor control path — same as GUI; correct for full 24-bit addressing.
+        // Sends bRequest=0x01 with wValue=word_addr[15:0], wIndex=word_addr[23:16],
+        // waits ROM_READ_DELAY_MS, then reads 64 bytes from EP2 IN.
+        // Non-pipelined to avoid double-buffer interleaving issues.
         let mut last_pct = 0u32;
-        let mut prev_cmd_written = false;
-        let mut prev_addr = 0u32;
-        if chunk_count > 0 {
-            let byte_addr = start_addr;
-            let word_addr = byte_addr / 2;
-            let bank = (word_addr >> 16) as u8;
-            let addr_16 = (word_addr & 0xFFFF) as u16;
-            let cmd = [
-                0x01u8,
-                (addr_16 & 0xFF) as u8,
-                ((addr_16 >> 8) & 0xFF) as u8,
-                bank,
-            ];
-            if let Err(e) = handle.write_bulk(cmd_ep, &cmd, TIMEOUT) {
-                println!("\n  ERROR at chunk 0: write_bulk: {e}");
-            } else {
-                prev_cmd_written = true;
-                prev_addr = byte_addr;
-            }
-        }
         for chunk in 0..chunk_count {
-            if !prev_cmd_written {
-                break;
-            }
+            let byte_addr = start_addr + chunk * 64;
+            let word_addr = byte_addr / 2;
+            let wvalue = (word_addr & 0xFFFF) as u16;
+            let windex = ((word_addr >> 16) & 0xFF) as u16;
+
+            handle
+                .write_control(0x40, 0x01, wvalue, windex, &[], TIMEOUT)
+                .with_context(|| {
+                    format!("EP0 ROM read at byte_addr=0x{byte_addr:06X}")
+                })?;
+
+            std::thread::sleep(Duration::from_millis(5));
+
             let mut buf = [0u8; 64];
             match handle.read_bulk(data_ep, &mut buf, Duration::from_secs(3)) {
                 Ok(len) => {
                     file.write_all(&buf[..len])?;
-                    // Write next command while reading overlap
-                    let next_addr = start_addr + (chunk + 1) * 64;
-                    if chunk + 1 < chunk_count {
-                        let word_addr = next_addr / 2;
-                        let bank = (word_addr >> 16) as u8;
-                        let addr_16 = (word_addr & 0xFFFF) as u16;
-                        let cmd = [
-                            0x01u8,
-                            (addr_16 & 0xFF) as u8,
-                            ((addr_16 >> 8) & 0xFF) as u8,
-                            bank,
-                        ];
-                        prev_cmd_written = handle.write_bulk(cmd_ep, &cmd, TIMEOUT).is_ok();
-                        prev_addr = next_addr;
-                    } else {
-                        prev_cmd_written = false;
-                    }
                 }
                 Err(e) => {
-                    println!("\n  ERROR at chunk {}: read_bulk: {e}", chunk);
+                    println!("\n  ERROR at chunk {chunk}: read_bulk: {e}");
                     break;
                 }
             }
+
             let pct = (chunk * 100) / chunk_count;
             if pct != last_pct {
                 last_pct = pct;
-                let addr_mb = prev_addr as f64 / (1024.0 * 1024.0);
-                print!("\r  Progress: {}% ({:.1} MB)", pct, addr_mb);
+                let addr_mb = byte_addr as f64 / (1024.0 * 1024.0);
+                print!("\r  Progress: {pct}% ({addr_mb:.1} MB)");
                 use std::io::Write;
                 std::io::stdout().flush()?;
             }
