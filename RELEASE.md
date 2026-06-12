@@ -18,14 +18,14 @@ use those command names.
 - [x] README explains install, firmware upload, ROM dump, save dump, GUI, and safety.
 - [x] Write operations are documented as risky.
 - [ ] Test on Windows 10/11 with Zadig WinUSB installed.
-- [ ] Test with the physical EZ-Writer II attached:
-  - [ ] `ezwriter-cli list`
-  - [ ] `ezwriter-cli firmware-download tusbez.bin`
-  - [ ] `ezwriter-cli cart-info`
-  - [ ] `ezwriter-cli dump test.gba`
-  - [ ] `ezwriter-cli save-read 0 2048 --output test.sav`
+- [x] Test with the physical EZ-Writer II attached (tested via SSH to Windows desktop):
+  - [x] `ezwriter-cli list` — detected ACTIVE mode 0548:1005
+  - [ ] `ezwriter-cli firmware-download tusbez.bin` — was already active, couldn't test
+  - [x] `ezwriter-cli cart-info` — read POKEMON SAPP (AXPE) header correctly
+  - [x] `ezwriter-cli dump test.gba` — 64KB dump with valid GBA magic
+  - [ ] `ezwriter-cli save-read 0 2048 --output test.sav` — not yet tested
 - [ ] Attach screenshots or terminal output to the Reddit post if available.
-- [ ] Rename the GitHub repo slug if desired.
+- [x] Rename the GitHub repo slug to `ez-flash-ii-usb-flasher`.
 
 ## Reddit Post Draft
 

@@ -40,9 +40,9 @@
 
 ## Pre-flight Checklist
 
-- [ ] Device shows in `ezwriter-cli list`
+- [x] Device shows in `ezwriter-cli list` (verified: detected ACTIVE mode 0548:1005)
 - [ ] Firmware loaded if the device starts in bootloader mode
-- [ ] Cartridge detected by `ezwriter-cli cart-info`
+- [x] Cartridge detected by `ezwriter-cli cart-info` (verified: read POKEMON SAPP AXPE)
 - [ ] Current ROM backup exists
 - [ ] Current save backup exists
 - [ ] Backup sizes look plausible
