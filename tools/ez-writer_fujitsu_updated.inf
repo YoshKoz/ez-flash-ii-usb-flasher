@@ -1,0 +1,51 @@
+; EZ-Writer_fujitsu.inf (updated with bootloader VID:PID)
+[Strings]
+DeviceName = "EZ-Writer fujitsu"
+VendorName = "Tyan Computer Corp."
+SourceName = "EZ-Writer fujitsu Install Disk"
+DeviceID   = "VID_0548&PID_1005"
+BootloaderID = "VID_0547&PID_2131"
+DeviceGUID = "{4A4E4B89-A926-4CC8-8B17-9506B5AA198A}"
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "USBDevice"
+ClassGuid   = {88bae032-5a81-49f0-bc3d-a4ff138216d6}
+Provider    = "libwdi"
+DriverVer   = 06/02/2012, 6.1.7600.16385
+
+[Manufacturer]
+%VendorName% = libusbDevice_WinUSB,NTx86,NTamd64,NTarm64
+
+[libusbDevice_WinUSB.NTx86]
+%DeviceName% = USB_Install, USB\%DeviceID%
+%DeviceName% = USB_Install, USB\%BootloaderID%
+
+[libusbDevice_WinUSB.NTamd64]
+%DeviceName% = USB_Install, USB\%DeviceID%
+%DeviceName% = USB_Install, USB\%BootloaderID%
+
+[libusbDevice_WinUSB.NTarm64]
+%DeviceName% = USB_Install, USB\%DeviceID%
+%DeviceName% = USB_Install, USB\%BootloaderID%
+
+[USB_Install]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[USB_Install.Services]
+Include    = winusb.inf
+AddService = WinUSB,0x00000002,WinUSB_ServiceInstall
+
+[WinUSB_ServiceInstall]
+DisplayName   = "WinUSB Kernel Driver"
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\WinUSB.sys
+
+[USB_Install.HW]
+AddReg = AddDeviceInterfaceGUID
+
+[AddDeviceInterfaceGUID]
+HKR,,DeviceInterfaceGUIDs,0x10000,%DeviceGUID%

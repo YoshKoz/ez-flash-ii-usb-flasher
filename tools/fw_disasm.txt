@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/home/yoshkoz/Development/ezwriter-reverse/tools/disasm_fw.py", line 10, in <module>
+    md = Cs(CS_ARCH_MCS51, CS_MODE_MCS51)
+            ^^^^^^^^^^^^^
+NameError: name 'CS_ARCH_MCS51' is not defined. Did you mean: 'CS_ARCH_MIPS'?

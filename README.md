@@ -56,19 +56,22 @@ features exist for testing and recovery work, but you should back up first and r
 - **Linux** — may need a udev rule or root for direct USB access.
 - **macOS** — no driver needed, but grant USB permission when prompted.
 
-### Build everything
+### Build CLI
 
 ```console
-cd src/ezwriter-cli && cargo build --release && cd ../ezwriter-gui && cargo build --release
+cd src/ezwriter-cli
+cargo build --release
 ```
 
-### Detect → Initialize → Dump (4 commands)
+### Detect → Init → Dump
 
 ```console
+# From the src/ezwriter-cli/ directory:
+
 # 1. Detect
 ./target/release/ezwriter-cli list
 
-# 2. Load firmware (only needed if in bootloader mode 0547:2131)
+# 2. Load firmware (if in bootloader mode 0547:2131)
 ./target/release/ezwriter-cli firmware-download tusbez.bin
 
 # 3. Identify cartridge
@@ -82,31 +85,26 @@ cd src/ezwriter-cli && cargo build --release && cd ../ezwriter-gui && cargo buil
 (Windows: replace `./target/release/ezwriter-cli` with `.\target\release\ezwriter-cli.exe`)
 
 `tusbez.bin` is the original 8051 firmware loaded into Cypress AN2131 RAM.
-The chip has no persistent storage — unplugging resets it, so firmware
-must be uploaded on every connection.
+Unplugging resets the chip, so firmware must be uploaded on every connection.
 
 ## GUI
+
+Build from `src/ezwriter-gui`:
 
 ```console
 cd src/ezwriter-gui
 cargo build --release
 ```
 
-Windows:
+Run from the same directory (loader files are in `src/ezwriter-gui`):
 
 ```console
-target\release\ezwriter-gui.exe
+./target/release/ezwriter-gui          # Linux/macOS
+target\release\ezwriter-gui.exe       # Windows
 ```
 
-Linux/macOS:
-
-```console
-./target/release/ezwriter-gui
-```
-
-If you launch the GUI from `src/ezwriter-gui`, the loader files are already in
-the current directory. If you copy or double-click the executable elsewhere, copy
-`loader_table1.bin` and `loader_table2.bin` next to it first.
+If you move the executable elsewhere, copy `loader_table1.bin` and
+`loader_table2.bin` next to it first.
 
 The GUI has five tabs:
 
@@ -161,9 +159,6 @@ sequenceDiagram
     D-->>H: Bulk responses
 ```
 
-The old Windows driver mostly wrapped USB transfers. This project sends those
-transfers directly with libusb through WinUSB or the platform USB stack.
-
 Full protocol notes: [docs/protocol_notes.md](docs/protocol_notes.md)
 
 ## Project Layout
@@ -172,7 +167,6 @@ Full protocol notes: [docs/protocol_notes.md](docs/protocol_notes.md)
 .
 |-- src/ezwriter-cli/       Rust CLI
 |-- src/ezwriter-gui/       Rust GUI
-|-- src/*.py                Reverse-engineering probes and experiments
 |-- docs/                   Protocol notes and original driver analysis
 |-- driver/winusb-inf/      Optional WinUSB INF files
 |-- SAFETY.md               Write-operation safety guide
