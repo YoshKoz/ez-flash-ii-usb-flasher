@@ -136,7 +136,7 @@ flowchart LR
     CART["EZ-Flash II<br/>GBA cartridge"]
 
     PC <--> USB
-    USB <-->|"EP0 control<br/>EP2 bulk OUT<br/>EP6 bulk IN"| MCU
+    USB <-->|"EP0 control<br/>EP4 bulk OUT<br/>EP2 bulk IN"| MCU
     MCU <-->|"parallel cart bus"| CART
 ```
 
@@ -187,4 +187,4 @@ own, and GBA development. Do not use it for piracy.
 - [WinUSB](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/introduction-to-winusb-for-developers)
 - [Zadig](https://zadig.akeo.ie/)
 - [egui](https://github.com/emilk/egui)
-- [Infineon EZ-USB FX2LP family](https://www.infineon.com/cms/en/product/usb-solutions/ez-usb-fx2lp/)
+- [Cypress EZ-USB AN2131 TRM](https://www.infineon.com/assets/row/public/documents/24/44/infineon-an2131-trm-usermanual-en.pdf)
