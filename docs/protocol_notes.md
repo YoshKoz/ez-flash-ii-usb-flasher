@@ -311,7 +311,7 @@ For ROM reads (cmd=0x01).
 ## References
 
 - Cypress EZ-USB AN2131 TRM (Technical Reference Manual)
-- [Infineon EZ-USB FX2LP](https://www.infineon.com/cms/en/product/usb-solutions/ez-usb-fx2lp/)
+- [Cypress EZ-USB AN2131 TRM](https://www.infineon.com/assets/row/public/documents/24/44/infineon-an2131-trm-usermanual-en.pdf)
 - EZ-USB General Purpose Driver (ezusb.sys) documentation
 - [asie's wiki — EZ Flash registers](https://wiki.asie.pl/doku.php?id=notes%3Aflashcart%3Aezflash)
 - [EZ3 manage source](https://github.com/ez-flash/ez3manage)
