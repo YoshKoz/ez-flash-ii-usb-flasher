@@ -873,161 +873,47 @@ fn save_read_via_reg(
     Ok(all)
 }
 
-/// Try save read with word addressing (byte_addr/2) - matching ROM protocol
-fn save_read_word_addr(
+fn save_read_original(
     handle: &DeviceHandle<GlobalContext>,
-    data_ep: u8,
     cmd_ep: u8,
+    data_ep: u8,
     byte_addr: u32,
     count: u32,
     suffix: u8,
 ) -> Result<Vec<u8>> {
     // Select save type
-    let select_cmd = [0x14u8, suffix, 0x00];
-    handle.write_bulk(cmd_ep, &select_cmd, TIMEOUT)?;
-    std::thread::sleep(Duration::from_millis(50));
+    let select = [0x14u8, suffix, 0x00, 0x00, 0x00];
+    handle.write_bulk(cmd_ep, &select, TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(100));
 
     let mut all = Vec::new();
     for chunk in 0..count {
         let addr = byte_addr + chunk * 64;
-        let word_addr = addr / 2;  // Convert to word address like ROM
+        // Firmware applies (addr & 7) × 2 to Xfff3 bus config register.
+        // Host sends byte address directly — no word conversion.
         let cmd = [
             0x02u8,
-            (word_addr & 0xFF) as u8,
-            ((word_addr >> 8) & 0xFF) as u8,
-            ((word_addr >> 16) & 0xFF) as u8,
+            (addr & 0xFF) as u8,
+            ((addr >> 8) & 0xFF) as u8,
+            ((addr >> 16) & 0xFF) as u8,
             suffix,
-            0,
+            0x00,
         ];
         handle.write_bulk(cmd_ep, &cmd[..5], TIMEOUT)?;
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
 
         let mut buf = [0u8; 64];
         match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
             Ok(len) => {
                 all.extend_from_slice(&buf[..len]);
-                let h: String = buf[..8].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-                println!("  [{chunk:02}] word=0x{:06X} byte=0x{:06X}: {}...", word_addr, addr, h);
             }
             Err(e) => {
-                println!("  [{chunk:02}] {e}");
+                eprintln!("  [{chunk:02}] {e}");
                 break;
             }
         }
     }
     Ok(all)
-}
-
-// ---------------------------------------------------------------------------
-// Save read - original method
-// ---------------------------------------------------------------------------
-
-fn cmd_save_read(
-    byte_addr: u32,
-    count: u32,
-    save_type: char,
-    output: Option<PathBuf>,
-    use_word_addr: bool,
-    use_reg: bool,
-    use_rom_read: bool,
-    rom_offset: u32,
-) -> Result<()> {
-    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
-    let handle = device.open()?;
-    let config = device.active_config_descriptor()?;
-    for iface in config.interfaces() {
-        for iface_desc in iface.descriptors() {
-            let _ = handle.claim_interface(iface_desc.interface_number());
-        }
-    }
-    for ep in 0x01u8..=0x07u8 {
-        let _ = handle.clear_halt(ep);
-        let _ = handle.clear_halt(ep | 0x80);
-    }
-
-    let cmd_ep = 0x04;
-    let data_ep = 0x82;
-    let suffix = save_type as u8;
-
-    if use_rom_read {
-        println!("Method: rom_read (0x01) at offset 0x{rom_offset:X}");
-        let data = save_read_via_rom_read(&handle, data_ep, cmd_ep, byte_addr, count, rom_offset, suffix)?;
-        if let Some(path) = output {
-            fs::write(&path, &data)?;
-            println!("Wrote {} bytes to {}", data.len(), path.display());
-        }
-        println!("Total: {} bytes", data.len());
-        return Ok(());
-    }
-
-    if use_reg {
-        println!("Method: register unlock + RAM page + save read");
-        let data = save_read_via_reg(&handle, cmd_ep, data_ep, byte_addr, count, suffix)?;
-        if let Some(path) = output {
-            fs::write(&path, &data)?;
-            println!("Wrote {} bytes to {}", data.len(), path.display());
-        }
-        println!("Total: {} bytes", data.len());
-        return Ok(());
-    }
-
-    if use_word_addr {
-        println!("Method: word addressing (byte_addr/2)");
-        let data = save_read_word_addr(&handle, data_ep, cmd_ep, byte_addr, count, suffix)?;
-        if let Some(path) = output {
-            fs::write(&path, &data)?;
-            println!("Wrote {} bytes to {}", data.len(), path.display());
-        }
-        println!("Total: {} bytes", data.len());
-        return Ok(());
-    }
-
-    // Original method
-    println!(
-        "Method: original (byte address, 0x14+0x02) type='{}' (0x{:02X})",
-        save_type, suffix
-    );
-    let select_cmd = [0x14u8, suffix, 0x00];
-    handle.write_bulk(cmd_ep, &select_cmd, TIMEOUT)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let mut cart_data = Vec::new();
-    for chunk in 0..count {
-        let addr = byte_addr + chunk * 64;
-        let mut cmd = [0x02u8, 0, 0, 0, suffix, 0];
-        cmd[1] = (addr & 0xFF) as u8;
-        cmd[2] = ((addr >> 8) & 0xFF) as u8;
-        cmd[3] = ((addr >> 16) & 0xFF) as u8;
-        handle.write_bulk(cmd_ep, &cmd[..5], TIMEOUT)?;
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        let mut buf = [0u8; 64];
-        match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
-            Ok(len) => {
-                cart_data.extend_from_slice(&buf[..len]);
-                let h: String = buf[..16]
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if chunk % 2 == 0 {
-                    println!("  [{chunk:02}] 0x{:06X}: {}", addr, h);
-                }
-            }
-            Err(e) => {
-                println!("  [{chunk:02}] {e}");
-                break;
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    println!("  Total: {} bytes", cart_data.len());
-
-    if let Some(path) = output {
-        fs::write(&path, &cart_data).context("writing save file")?;
-        println!("  Wrote to {}", path.display());
-    }
-    Ok(())
 }
 
 /// Probe all save read strategies
