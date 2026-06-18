@@ -873,7 +873,9 @@ fn save_read_via_reg(
     Ok(all)
 }
 
-fn save_read_original(
+// Firmware applies (addr & 7) × 2 to Xfff3 bus config register.
+// Host sends byte address directly — no word conversion needed.
+fn save_read_byte_addr(
     handle: &DeviceHandle<GlobalContext>,
     cmd_ep: u8,
     data_ep: u8,
@@ -881,25 +883,21 @@ fn save_read_original(
     count: u32,
     suffix: u8,
 ) -> Result<Vec<u8>> {
-    // Select save type
-    let select = [0x14u8, suffix, 0x00, 0x00, 0x00];
+    let select = [0x14u8, suffix, 0x00];
     handle.write_bulk(cmd_ep, &select, TIMEOUT)?;
     std::thread::sleep(Duration::from_millis(100));
 
-    let mut all = Vec::new();
+    let mut all = Vec::with_capacity(count as usize * 64);
     for chunk in 0..count {
         let addr = byte_addr + chunk * 64;
-        // Firmware applies (addr & 7) × 2 to Xfff3 bus config register.
-        // Host sends byte address directly — no word conversion.
         let cmd = [
             0x02u8,
             (addr & 0xFF) as u8,
             ((addr >> 8) & 0xFF) as u8,
             ((addr >> 16) & 0xFF) as u8,
             suffix,
-            0x00,
         ];
-        handle.write_bulk(cmd_ep, &cmd[..5], TIMEOUT)?;
+        handle.write_bulk(cmd_ep, &cmd, TIMEOUT)?;
         std::thread::sleep(Duration::from_millis(100));
 
         let mut buf = [0u8; 64];
@@ -914,6 +912,67 @@ fn save_read_original(
         }
     }
     Ok(all)
+}
+
+fn cmd_save_read(
+    byte_addr: u32,
+    count: u32,
+    save_type: char,
+    output: Option<PathBuf>,
+    use_word_addr: bool,
+    use_reg: bool,
+    use_rom_read: bool,
+    rom_offset: u32,
+) -> Result<()> {
+    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+    let handle = device.open()?;
+    let config = device.active_config_descriptor()?;
+    for iface in config.interfaces() {
+        for iface_desc in iface.descriptors() {
+            let _ = handle.claim_interface(iface_desc.interface_number());
+        }
+    }
+    for ep in 0x01u8..=0x07u8 {
+        let _ = handle.clear_halt(ep);
+        let _ = handle.clear_halt(ep | 0x80);
+    }
+
+    let cmd_ep = 0x04;
+    let data_ep = 0x82;
+    let suffix = save_type as u8;
+
+    if use_rom_read {
+        println!("Method: rom_read (0x01) at offset 0x{rom_offset:X}");
+        let data = save_read_via_rom_read(&handle, data_ep, cmd_ep, byte_addr, count, rom_offset, suffix)?;
+        if let Some(path) = output {
+            fs::write(&path, &data)?;
+            println!("Wrote {} bytes to {}", data.len(), path.display());
+        }
+        println!("Total: {} bytes", data.len());
+        return Ok(());
+    }
+
+    if use_reg {
+        println!("Method: register unlock + RAM page + save read");
+        let data = save_read_via_reg(&handle, cmd_ep, data_ep, byte_addr, count, suffix)?;
+        if let Some(path) = output {
+            fs::write(&path, &data)?;
+            println!("Wrote {} bytes to {}", data.len(), path.display());
+        }
+        println!("Total: {} bytes", data.len());
+        return Ok(());
+    }
+
+    // --word-addr kept as flag for backward compat; both paths now use byte addressing
+    let method = if use_word_addr { "byte_addr (corrected)" } else { "byte_addr" };
+    println!("Method: {method} (0x14+0x02) type='{}' (0x{:02X})", save_type, suffix);
+    let data = save_read_byte_addr(&handle, cmd_ep, data_ep, byte_addr, count, suffix)?;
+    if let Some(path) = output {
+        fs::write(&path, &data)?;
+        println!("Wrote {} bytes to {}", data.len(), path.display());
+    }
+    println!("Total: {} bytes", data.len());
+    Ok(())
 }
 
 /// Probe all save read strategies
@@ -949,9 +1008,9 @@ fn cmd_save_probe(count: u32) -> Result<()> {
     let data3 = save_read_original(&handle, cmd_ep, data_ep, 0, count, b'f')?;
     println!("  Got {} bytes", data3.len());
 
-    // Test 4: Word addressing with 'f' type (most common in GUI)
-    println!("\n=== Test 4: Word address + type='f' ===");
-    let data4 = save_read_word_addr(&handle, data_ep, cmd_ep, 0, count, b'f')?;
+    // Test 4: Byte-address method with 'f' type (replaces removed word-address variant)
+    println!("\n=== Test 4: Byte address + type='f' ===");
+    let data4 = save_read_byte_addr(&handle, cmd_ep, data_ep, 0, count, b'f')?;
     println!("  Got {} bytes", data4.len());
 
     // Test 5: Read from different byte addresses
