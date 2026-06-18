@@ -29,6 +29,10 @@ const CPUCS_ADDR: u16 = 0x7F92;
 /// Timeout for USB control transfers
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Embedded firmware tables (compiled in so `reload` needs no file args)
+const TABLE1: &[u8] = include_bytes!("../loader_table1.bin");
+const TABLE2: &[u8] = include_bytes!("../loader_table2.bin");
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -185,6 +189,8 @@ enum Commands {
         #[arg(default_value = "0x40", long)]
         erase_cmd: u8,
     },
+    /// Reload firmware: CPUCS reset → OS power cycle if needed → auto init-exact
+    Reload,
     /// Bulk endpoint test
     BulkTest,
     /// Write register via cmd 0x19 (Write_Operation = 25)
@@ -367,28 +373,32 @@ fn download_firmware(handle: &DeviceHandle<GlobalContext>, fw: &[u8], no_cpu: bo
     Ok(())
 }
 
-fn load_chunk_table(path: &PathBuf) -> Result<Vec<(u16, Vec<u8>)>> {
-    let data = fs::read(path).with_context(|| format!("Failed to read chunk table: {:?}", path))?;
+fn parse_chunk_table(data: &[u8]) -> Result<Vec<(u16, Vec<u8>)>> {
     if data.len() < 10 || &data[..8] != b"EZWLDR1\0" {
-        bail!("Invalid chunk table: {}", path.display());
+        bail!("Invalid chunk table (bad magic)");
     }
     let count = u16::from_le_bytes([data[8], data[9]]) as usize;
     let mut chunks = Vec::with_capacity(count);
     let mut offset = 10;
     for _ in 0..count {
         if offset + 3 > data.len() {
-            bail!("Truncated chunk table header: {}", path.display());
+            bail!("Truncated chunk table header");
         }
         let addr = u16::from_le_bytes([data[offset], data[offset + 1]]);
         let len = data[offset + 2] as usize;
         offset += 3;
         if offset + len > data.len() {
-            bail!("Truncated chunk table payload: {}", path.display());
+            bail!("Truncated chunk table payload");
         }
         chunks.push((addr, data[offset..offset + len].to_vec()));
         offset += len;
     }
     Ok(chunks)
+}
+
+fn load_chunk_table(path: &PathBuf) -> Result<Vec<(u16, Vec<u8>)>> {
+    let data = fs::read(path).with_context(|| format!("reading chunk table: {}", path.display()))?;
+    parse_chunk_table(&data)
 }
 
 fn write_chunks(
@@ -1739,6 +1749,144 @@ fn cmd_read_reg(addr: u32) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Firmware reload helpers
+// ---------------------------------------------------------------------------
+
+fn run_init_exact_embedded(handle: &DeviceHandle<GlobalContext>) -> Result<()> {
+    let chunks1 = parse_chunk_table(TABLE1)?;
+    let chunks2 = parse_chunk_table(TABLE2)?;
+    cpucs(handle, 1)?;
+    cpucs(handle, 1)?;
+    write_chunks(handle, "table1", &chunks1)?;
+    cpucs(handle, 0)?;
+    cpucs(handle, 1)?;
+    write_chunks(handle, "table2", &chunks2)?;
+    cpucs(handle, 1)?;
+    cpucs(handle, 0)?;
+    Ok(())
+}
+
+fn wait_for_mode(vid: u16, pid: u16, timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    while std::time::Instant::now() < deadline {
+        if find_device(vid, pid).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn power_cycle_windows() -> Result<()> {
+    println!("Power cycling via Windows PnP manager...");
+    let script = r#"
+$dev = Get-PnpDevice -PresentOnly | Where-Object { $_.HardwareID -match 'VID_0548.*PID_1005' };
+if (-not $dev) { Write-Error 'Device not found'; exit 1 }
+Disable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false;
+Start-Sleep -Milliseconds 1000;
+Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false;
+Write-Output "Power cycled OK"
+"#;
+    let out = std::process::Command::new("powershell")
+        .args(["-Command", script])
+        .output()?;
+    if !out.status.success() {
+        bail!("PowerShell power cycle failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    println!("{}", String::from_utf8_lossy(&out.stdout).trim());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn power_cycle_linux(device: &rusb::Device<GlobalContext>) -> Result<()> {
+    println!("Power cycling via sysfs...");
+    let bus = device.bus_number();
+    let ports = device.port_numbers()?;
+    let sysfs_path = if ports.is_empty() {
+        format!("/sys/bus/usb/devices/usb{bus}")
+    } else {
+        let port_str: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+        format!("/sys/bus/usb/devices/{bus}-{}", port_str.join("."))
+    };
+    let auth = format!("{sysfs_path}/authorized");
+    println!("  sysfs path: {auth}");
+    let out = std::process::Command::new("pkexec")
+        .args(["sh", "-c", &format!("echo 0 > {auth} && sleep 0.5 && echo 1 > {auth}")])
+        .output()?;
+    if !out.status.success() {
+        bail!("sysfs power cycle failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+fn cmd_reload() -> Result<()> {
+    // Step 1: try CPUCS vendor request reset while in active mode
+    // This works if the USB auto-vector ISR is still running despite the 8051 being stuck
+    let active = find_device(EZWRITER_VID, EZWRITER_PID);
+    let in_boot = find_device(BOOTLOADER_VID, BOOTLOADER_PID).is_ok();
+
+    if let Ok((device, _)) = active {
+        println!("Device in active mode. Sending CPUCS reset...");
+        let handle = device.open()?;
+        let _ = handle.detach_kernel_driver(0);
+        // AN2131 CPUCS=0x7F92, bit0 8051RES: 1=hold in reset
+        let _ = handle.write_control(
+            0x40, VR_CYPRESS_WRITE, CPUCS_ADDR, 0,
+            &[0x01], Duration::from_millis(500),
+        );
+        drop(handle);
+        std::thread::sleep(Duration::from_millis(1500));
+
+        // If still in active mode, need OS-level power cycle
+        if find_device(EZWRITER_VID, EZWRITER_PID).is_ok() {
+            println!("CPUCS reset didn't trigger re-enumeration — using OS power cycle...");
+            #[cfg(target_os = "windows")]
+            power_cycle_windows()?;
+            #[cfg(target_os = "linux")]
+            {
+                let (dev, _) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+                power_cycle_linux(&dev)?;
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+            bail!("OS power cycle not supported on this platform. Unplug and replug manually.");
+        }
+    } else if in_boot {
+        println!("Device already in bootloader mode, skipping reset.");
+    } else {
+        bail!("No EZ-Writer device found.");
+    }
+
+    // Step 2: wait for bootloader
+    println!("Waiting for bootloader (up to 10s)...");
+    if !wait_for_mode(BOOTLOADER_VID, BOOTLOADER_PID, 10) {
+        bail!("Device did not enter bootloader mode. Try unplugging and replugging manually.");
+    }
+    println!("Bootloader detected.");
+
+    // Step 3: run init-exact with embedded tables
+    let (device, _desc) = find_device(BOOTLOADER_VID, BOOTLOADER_PID)?;
+    let handle = device.open()?;
+    let _ = handle.detach_kernel_driver(0);
+    let config = device.active_config_descriptor()?;
+    if let Some(iface) = config.interfaces().next()
+        && let Some(desc) = iface.descriptors().next()
+    {
+        let _ = handle.claim_interface(desc.interface_number());
+    }
+    run_init_exact_embedded(&handle)?;
+    drop(handle);
+
+    // Step 4: wait for active mode
+    println!("Waiting for active mode (up to 10s)...");
+    if !wait_for_mode(EZWRITER_VID, EZWRITER_PID, 10) {
+        bail!("Device did not enter active mode after firmware load.");
+    }
+    println!("Firmware loaded. Device ready.");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1799,6 +1947,7 @@ fn main() -> Result<()> {
             fast,
         } => cmd_dump(output, start, size, delay, fast)?,
         Commands::Reset => cmd_reset()?,
+        Commands::Reload => cmd_reload()?,
         Commands::Probe { request, value } => cmd_probe(request, value)?,
         Commands::RamRead { address } => cmd_ram_read(address)?,
         Commands::RamWrite { address, value } => cmd_ram_write(address, value)?,
