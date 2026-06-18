@@ -875,6 +875,8 @@ fn save_read_via_reg(
 
 // Firmware applies (addr & 7) × 2 to Xfff3 bus config register.
 // Host sends byte address directly — no word conversion needed.
+// Re-sends 0x14 select before each 0x02 read — firmware appears to
+// arm for a single read per select command.
 fn save_read_byte_addr(
     handle: &DeviceHandle<GlobalContext>,
     cmd_ep: u8,
@@ -883,13 +885,14 @@ fn save_read_byte_addr(
     count: u32,
     suffix: u8,
 ) -> Result<Vec<u8>> {
-    let select = [0x14u8, suffix, 0x00];
-    handle.write_bulk(cmd_ep, &select, TIMEOUT)?;
-    std::thread::sleep(Duration::from_millis(100));
-
     let mut all = Vec::with_capacity(count as usize * 64);
     for chunk in 0..count {
         let addr = byte_addr + chunk * 64;
+
+        let select = [0x14u8, suffix, 0x00];
+        handle.write_bulk(cmd_ep, &select, TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(50));
+
         let cmd = [
             0x02u8,
             (addr & 0xFF) as u8,
@@ -903,10 +906,12 @@ fn save_read_byte_addr(
         let mut buf = [0u8; 64];
         match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
             Ok(len) => {
+                let h: String = buf[..len.min(8)].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                eprintln!("  [{chunk:03}] 0x{addr:06X}: {h}... ({len}B)");
                 all.extend_from_slice(&buf[..len]);
             }
             Err(e) => {
-                eprintln!("  [{chunk:02}] {e}");
+                eprintln!("  [{chunk:03}] 0x{addr:06X}: {e}");
                 break;
             }
         }
