@@ -429,7 +429,7 @@ impl EzWriterApp {
                 let sz = save_size_bytes(&save_type);
                 let mut all = Vec::with_capacity(sz);
                 for offset in (0..sz as u32).step_by(0x1000) {
-                    match device::read_save(offset, 64) {
+                    match device::read_save_with_type(offset, 64, &save_type) {
                         Ok(data) => all.extend(data),
                         Err(_) => break,
                     }
@@ -440,6 +440,10 @@ impl EzWriterApp {
                             sz / 1024
                         )));
                     }
+                }
+                if let Err(e) = device::validate_save_dump(&all, &save_type) {
+                    let _ = tx.send(BgCmd::Error(e.to_string()));
+                    return;
                 }
                 if let Err(e) = device::dump_to_file(&path, &all) {
                     let _ = tx.send(BgCmd::Error(e.to_string()));
