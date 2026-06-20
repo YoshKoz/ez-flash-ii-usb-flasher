@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+﻿use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use rusb::{Device, DeviceDescriptor, DeviceHandle, Direction, GlobalContext};
 use std::fmt::Write as _;
@@ -54,6 +54,19 @@ enum Commands {
         /// Skip CPU reset/start (just download, no register writes)
         #[arg(long)]
         no_cpu: bool,
+        /// Path to optional loader table (e.g. loader_table2.bin) to patch
+        /// firmware with EEPROM bit-bang code before CPU start.
+        #[arg(long)]
+        loader_table: Option<PathBuf>,
+        /// Allow flashing from active mode (0548:1005). CPU reset after flash
+        /// restarts from XRAM without re-reading EEPROM, so patched firmware
+        /// runs for this session only.
+        #[arg(long)]
+        force: bool,
+        /// Poll for bootloader mode (0547:2131) until it appears, then flash
+        /// immediately. Replug the device while this command is running.
+        #[arg(long)]
+        watch: bool,
     },
     /// Initialize AN2131 using exact chunk tables extracted from ezwinit.sys
     InitExact {
@@ -131,9 +144,24 @@ enum Commands {
         /// Save type: f=FLASH, e=EEPROM, g=?, h=?
         #[arg(long, default_value = "f")]
         save_type: char,
+        /// Save read command byte. Experimental; default preserves the old command.
+        #[arg(long, default_value_t = 0x02, value_parser = parse_u8_auto)]
+        read_cmd: u8,
+        /// Firmware save handler byte. Defaults to the known FLASH/SRAM handler for FLASH saves.
+        #[arg(long, value_parser = parse_u8_auto)]
+        inner_cmd: Option<u8>,
+        /// Skip the 0x14 select-type command before reading.
+        #[arg(long)]
+        no_select: bool,
+        /// Write output even when validation says it is not a real save.
+        #[arg(long)]
+        allow_unverified: bool,
         /// Output file path (writes binary; omit to print hex to stdout)
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Use byte addressing instead of the default word addressing (addr/2).
+        #[arg(long)]
+        byte_addr: bool,
     },
     /// USB bus reset (port reset)
     Reset,
@@ -197,6 +225,21 @@ enum Commands {
     PassiveRead,
     /// Send bulk data to EP2 OUT, read from EP6 IN
     BulkTest,
+    /// Probe EEPROM save read: try all cmd/inner combos, log responses
+    ProbeEeprom {
+        /// Comma-separated read_cmd bytes to try, e.g. "0x01,0x02,0x11,0x12"
+        #[arg(long, default_value = "0x01,0x02,0x03,0x04,0x11,0x12,0x13,0x14,0x15")]
+        cmds: String,
+        /// Comma-separated inner/handler bytes to try (0xFF = send 4-byte packet, no inner byte)
+        #[arg(long, default_value = "0xFF,0x65,0x67,0x69,0x00")]
+        inners: String,
+        /// Whether to send 0x14 select command before each read attempt
+        #[arg(long)]
+        with_select: bool,
+        /// Timeout per read attempt in ms (short = fast scan)
+        #[arg(long, default_value = "800")]
+        timeout_ms: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +253,63 @@ fn print_hex(data: &[u8]) {
             s
         });
         println!("    {hex_str}");
+    }
+}
+
+fn parse_u8_auto(s: &str) -> Result<u8, String> {
+    let trimmed = s.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u8::from_str_radix(hex, 16).map_err(|e| e.to_string())
+    } else {
+        trimmed.parse::<u8>().map_err(|e| e.to_string())
+    }
+}
+
+fn gen3_save_signature_count(data: &[u8]) -> usize {
+    // Gen 3 save sections start with this 4-byte signature; a full FLASH save has 14 sections.
+    const GEN3_SIG: [u8; 4] = [0x25, 0x20, 0x01, 0x08];
+    data.windows(GEN3_SIG.len())
+        .filter(|window| **window == GEN3_SIG)
+        .count()
+}
+
+fn starts_with_known_rom_stub(data: &[u8]) -> bool {
+    data.starts_with(&[0xff, 0x07, 0x00, 0x28, 0x0c, 0xd1, 0x10, 0x48])
+        || data.starts_with(&[0xff, 0xef, 0x00, 0x28, 0x0c, 0xd1, 0x10, 0x48])
+}
+
+fn validate_save_dump(data: &[u8], save_type: char) -> Result<()> {
+    if data.is_empty() {
+        bail!("save read returned no data");
+    }
+    if starts_with_known_rom_stub(data) {
+        bail!("save data starts with the known ROM/stale endpoint pattern, not save RAM");
+    }
+
+    if matches!(save_type, 'f' | 'F') && data.len() >= 128 * 1024 {
+        let signatures = gen3_save_signature_count(data);
+        if signatures < 14 {
+            bail!(
+                "FLASH save validation failed: found {signatures} Gen 3 section signatures, expected at least 14"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn default_save_read_inner_cmd(save_type: char) -> u8 {
+    match save_type {
+        // Patched firmware (loader_table2): cmd 0x02 checks inner byte:
+        //   0x66 = FLASH/SRAM handler (CJNE at 0x07D5)
+        //   0x65 = EEPROM handler (XRL #0x65 at 0x07FF)
+        //   0x68 = other handler
+        'f' | 'F' => 0x66,
+        'e' | 'E' => 0x65,
+        _ => save_type as u8,
     }
 }
 
@@ -312,37 +412,27 @@ fn ezusb_write_ram(handle: &DeviceHandle<GlobalContext>, address: u32, data: &[u
     Ok(())
 }
 
-/// Download firmware binary to EZ-USB, then start the CPU.
+/// Download firmware binary to EZ-USB, optionally write loader patch chunks,
+/// then restart CPU to trigger renumeration with new firmware.
+///
+/// On AN2131: writing CPUCS to 0x00 (reset) disconnects USB before firmware
+/// can be uploaded. So we write firmware+loader chunks with CPU running
+/// bootloader, then do reset+start atomically at the end.
 fn download_firmware(
     handle: &DeviceHandle<GlobalContext>,
     firmware: &[u8],
+    loader_chunks: &[(u16, Vec<u8>)],
     no_cpu: bool,
 ) -> Result<()> {
-    // 1. Optionally hold CPU in reset
-    if !no_cpu {
-        println!("  Asserting CPU reset...");
-        ezusb_write_ram(handle, CPUCS_ADDR as u32, &[0x00])?;
-    } else {
-        println!("  Skipping CPU reset (--no-cpu)");
-    }
-
-    // 2. Download firmware to internal RAM starting at address 0
-    // EZ-USB internal RAM starts at 0x0000 for program code
+    // 1. Download firmware to internal RAM (CPU runs bootloader, which
+    //    intercepts 0xA0 vendor commands and writes to the correct RAM).
     println!("  Downloading {} bytes of firmware...", firmware.len());
 
-    // Write in chunks to avoid control transfer size limits
-    // Max packet size for control EP0 is typically 64 bytes
-    // We'll use variable-sized chunks
-    let chunk_size = 64; // safe for full-speed control
+    let chunk_size = 64;
     let mut offset = 0;
     while offset < firmware.len() {
         let end = (offset + chunk_size).min(firmware.len());
-        let chunk = &firmware[offset..end];
-        let mut buf = Vec::with_capacity(chunk.len());
-        buf.extend_from_slice(chunk);
-
-        // Pad to ensure we send even for partial final chunk
-        ezusb_write_ram(handle, offset as u32, &buf)?;
+        ezusb_write_ram(handle, offset as u32, &firmware[offset..end])?;
         offset = end;
 
         if offset % 1024 == 0 || offset == firmware.len() {
@@ -353,12 +443,25 @@ fn download_firmware(
     }
     println!();
 
-    // 3. Optionally start CPU
+    // 2. Optionally write loader patch chunks (EEPROM bit-bang code etc.)
+    if !loader_chunks.is_empty() {
+        println!("  Writing {} loader patch chunks...", loader_chunks.len());
+        for (i, (addr, payload)) in loader_chunks.iter().enumerate() {
+            ezusb_write_ram(handle, *addr as u32, payload)?;
+            if i % 10 == 0 || i + 1 == loader_chunks.len() {
+                println!("    [{}/{}] addr=0x{addr:04X} len={}", i + 1, loader_chunks.len(), payload.len());
+            }
+        }
+    }
+
+    // 3. Restart CPU: reset then start to switch from bootloader to firmware.
+    //    With RENUM=0 the 8051 takes over USB and re-enumerates with new VID/PID.
     if !no_cpu {
-        println!("  Starting CPU (device will re-enumerate)...");
+        println!("  Restarting CPU (device will re-enumerate)...");
+        ezusb_write_ram(handle, CPUCS_ADDR as u32, &[0x00])?;
         ezusb_write_ram(handle, CPUCS_ADDR as u32, &[0x01])?;
     } else {
-        println!("  Skipping CPU start (--no-cpu, bootloader may auto-start)");
+        println!("  Skipping CPU restart (--no-cpu)");
     }
 
     println!("  Firmware download complete.");
@@ -433,10 +536,28 @@ fn cmd_info() -> Result<()> {
     Ok(())
 }
 
-fn cmd_firmware_download(firmware_path: &PathBuf, no_cpu: bool) -> Result<()> {
-    // Must be in bootloader mode
-    let (device, _desc) = find_device(BOOTLOADER_VID, BOOTLOADER_PID)?;
-    println!("Found EZ-Writer in bootloader mode.");
+fn cmd_firmware_download(firmware_path: &PathBuf, no_cpu: bool, loader_table: &Option<PathBuf>, force: bool, watch: bool) -> Result<()> {
+    let (device, _desc) = if watch {
+        println!("Watching for EZ-Writer bootloader (0547:2131)... replug device now.");
+        loop {
+            if let Ok(d) = find_device(BOOTLOADER_VID, BOOTLOADER_PID) {
+                println!("Found EZ-Writer in bootloader mode.");
+                break d;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    } else if let Ok(d) = find_device(BOOTLOADER_VID, BOOTLOADER_PID) {
+        println!("Found EZ-Writer in bootloader mode.");
+        d
+    } else if force {
+        let d = find_device(EZWRITER_VID, EZWRITER_PID)
+            .context("No EZ-Writer device found in bootloader or active mode")?;
+        println!("Found EZ-Writer in ACTIVE mode (--force). Writing firmware to XRAM.");
+        println!("CPU will restart from XRAM after flash (EEPROM not re-read until power cycle).");
+        d
+    } else {
+        bail!("No device in bootloader mode (0547:2131). Use --watch and replug, or --force to flash from active mode.");
+    };
 
     // Load firmware binary
     let firmware = fs::read(firmware_path)
@@ -477,7 +598,16 @@ fn cmd_firmware_download(firmware_path: &PathBuf, no_cpu: bool) -> Result<()> {
         handle.claim_interface(desc.interface_number())?;
     }
 
-    download_firmware(&handle, &firmware, no_cpu)?;
+    // Load optional loader patch table
+    let loader_chunks = if let Some(table_path) = loader_table {
+        let chunks = load_chunk_table(table_path)?;
+        println!("  Loaded loader table: {} chunks", chunks.len());
+        chunks
+    } else {
+        Vec::new()
+    };
+
+    download_firmware(&handle, &firmware, &loader_chunks, no_cpu)?;
     println!("Firmware sent. Device should now re-enumerate.");
     println!("Run 'ezwriter-cli list' again after a few seconds.");
 
@@ -857,11 +987,36 @@ fn cmd_reset_cart() -> Result<()> {
     Ok(())
 }
 
+/// Write a 16-bit value to a 24-bit cartridge-bus register via cmd 0x19.
+/// Format: [0x19, addr_lo, addr_mid, addr_hi, data_lo, data_hi]
+fn write_reg(
+    handle: &DeviceHandle<GlobalContext>,
+    cmd_ep: u8,
+    addr: u32,
+    data: u16,
+) -> Result<()> {
+    let buf = [
+        0x19u8,
+        (addr & 0xFF) as u8,
+        ((addr >> 8) & 0xFF) as u8,
+        ((addr >> 16) & 0xFF) as u8,
+        (data & 0xFF) as u8,
+        ((data >> 8) & 0xFF) as u8,
+    ];
+    handle.write_bulk(cmd_ep, &buf, TIMEOUT)?;
+    Ok(())
+}
+
 fn cmd_save_read(
     byte_addr: u32,
     count: u32,
     save_type: char,
+    read_cmd: u8,
+    inner_cmd: Option<u8>,
+    no_select: bool,
+    allow_unverified: bool,
     output: Option<PathBuf>,
+    word_addr: bool,
 ) -> Result<()> {
     let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
     let handle = device.open()?;
@@ -878,30 +1033,60 @@ fn cmd_save_read(
 
     let cmd_ep = 0x04;
     let data_ep = 0x82;
+
+    // Unlock EZ-Flash II CPLD before save-chip access (asie unlock sequence).
+    // Without this, the save chip is gated off and every read returns the same
+    // stale 128-byte buffer regardless of address.
+    write_reg(&handle, cmd_ep, 0x9FE000, 0xD200)?;
+    write_reg(&handle, cmd_ep, 0x800000, 0x1500)?;
+    write_reg(&handle, cmd_ep, 0x802000, 0xD200)?;
+    write_reg(&handle, cmd_ep, 0x804000, 0x1500)?;
     let suffix = save_type as u8;
+    let packet_tail = inner_cmd.unwrap_or_else(|| default_save_read_inner_cmd(save_type));
     println!(
-        "Save read: type='{}' (0x{:02X}) addr=0x{:X} {} chunks",
-        save_type, suffix, byte_addr, count
+        "Save read: type='{}' (0x{:02X}) read_cmd=0x{:02X} inner=0x{:02X} addr=0x{:X} {} chunks",
+        save_type, suffix, read_cmd, packet_tail, byte_addr, count
     );
 
-    // Step 1: Select save type via cmd 0x14 + suffix
-    let select_cmd = [0x14u8, suffix, 0x00];
-    handle.write_bulk(cmd_ep, &select_cmd, TIMEOUT)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Step 1: Select save type via cmd 0x14 + firmware handler byte.
+    if !no_select {
+        let select_cmd = [0x14u8, packet_tail, 0x00];
+        handle.write_bulk(cmd_ep, &select_cmd, TIMEOUT)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 
     // Step 2: Read save data chunks
+    // Protocol (from firmware disassembly):
+    //   - cmd 0x02: page setup. Firmware dispatches to FLASH handler when byte3=0x66.
+    //     Byte layout: [0x02, addr_lo, addr_mid, 0x66, addr_bank, 0]
+    //     FLASH handler writes addr_mid→PORTB (latch high addr), addr_lo→PORTC.
+    //     Must be sent once per 256-byte page to advance addr_mid.
+    //   - cmd 0x03: reads 64 bytes into EP2 IN. Inner loop: PORTB=cmd(0x03)+i, PORTC=addr_lo.
+    //     CPLD latches page from cmd 0x02 and auto-advances; addr_lo selects within-page offset.
+    // Drain stale EP2 data. The firmware auto-streams 8×64-byte chunks into EP2 IN;
+    // all 8 must be consumed before the first cmd 0x02 response is reliable.
+    for _ in 0..8 {
+        let mut drain = [0u8; 64];
+        if handle.read_bulk(data_ep, &mut drain, Duration::from_millis(200)).is_err() { break; }
+    }
+
     let mut cart_data = Vec::new();
+
     for chunk in 0..count {
-        let addr = byte_addr + chunk * 64;
-        let mut cmd = [0x02u8, 0, 0, 0, suffix, 0];
-        cmd[1] = (addr & 0xFF) as u8;
-        cmd[2] = ((addr >> 8) & 0xFF) as u8;
-        cmd[3] = ((addr >> 16) & 0xFF) as u8;
-        handle.write_bulk(cmd_ep, &cmd[..5], TIMEOUT)?;
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let byte_offset = chunk * 64;
+        // cmd 0x02 (SAVE_READ): [cmd, addr_lo, addr_mid, addr_hi, suffix]
+        let cmd = [
+            read_cmd,
+            (byte_offset & 0xFF) as u8,
+            ((byte_offset >> 8) & 0xFF) as u8,
+            ((byte_offset >> 16) & 0xFF) as u8,
+            packet_tail,
+        ];
+        handle.write_bulk(cmd_ep, &cmd, TIMEOUT)?;
 
         let mut buf = [0u8; 64];
-        match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
+        let save_read_timeout = Duration::from_secs(30);
+        match handle.read_bulk(data_ep, &mut buf, save_read_timeout) {
             Ok(len) => {
                 cart_data.extend_from_slice(&buf[..len]);
                 let h: String = buf[..16]
@@ -910,7 +1095,7 @@ fn cmd_save_read(
                     .collect::<Vec<_>>()
                     .join(" ");
                 if chunk % 2 == 0 {
-                    println!("  [{chunk:02}] 0x{:06X}: {}", addr, h);
+                    println!("  [{chunk:02}] 0x{:06X}: {}", byte_addr + chunk * 64, h);
                 }
             }
             Err(e) => {
@@ -921,11 +1106,29 @@ fn cmd_save_read(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     println!("  Total: {} bytes", cart_data.len());
+    println!(
+        "  Gen 3 save signatures: {}",
+        gen3_save_signature_count(&cart_data)
+    );
 
     if let Some(path) = output {
+        if let Err(error) = validate_save_dump(&cart_data, save_type) {
+            if allow_unverified {
+                println!("  WARNING: writing unverified save dump: {error}");
+            } else {
+                bail!(
+                    "{error}. Refusing to write {}; pass --allow-unverified only for protocol experiments",
+                    path.display()
+                );
+            }
+        }
         fs::write(&path, &cart_data).context("writing save file")?;
         println!("  Wrote to {}", path.display());
     }
+
+    // Re-lock the CPLD (best effort; ignore errors).
+    let _ = write_reg(&handle, cmd_ep, 0x9FC000, 0x1500);
+
     Ok(())
 }
 
@@ -1091,14 +1294,25 @@ fn cmd_dump(
         let _ = handle.clear_halt(ep | 0x80);
     }
 
-    // Reset flash before reading
-    let cmd_ep_rst = 0x04;
-    let seq: [(u8, u16); 4] = [(0xAA, 0xAAAA), (0x55, 0x5554), (0xF0, 0xAAAA), (0xFF, 0)];
-    for (cb, a) in &seq {
-        let da = a / 2;
-        let c = [*cb, (da & 0xFF) as u8, ((da >> 8) & 0xFF) as u8, 0x00];
-        let _ = handle.write_bulk(cmd_ep_rst, &c, Duration::from_millis(500));
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    // The EZ-Flash II firmware maintains a 8-chunk (512-byte) auto-stream ring in
+    // EP2 IN that advances with every USB IN transfer, independent of EP4 OUT cmds.
+    // Step 1: drain all 8 auto-stream slots to clear the ring.
+    for _ in 0..8 {
+        let mut drain = [0u8; 64];
+        let _ = handle.read_bulk(0x82, &mut drain, Duration::from_millis(200));
+    }
+    // Step 2: prime — send cmd addr=start_addr which loads ROM[start_addr] into the
+    // prefetch buffer; the firmware responds with a phantom packet first.
+    // Read the phantom and discard it; ROM[start_addr] is now prefetched.
+    {
+        let prime_word = start_addr / 2;
+        let prime_a16 = (prime_word & 0xFFFF) as u16;
+        let prime_bank = (prime_word >> 16) as u8;
+        let prime_cmd = [0x01u8, (prime_a16 & 0xFF) as u8, ((prime_a16 >> 8) & 0xFF) as u8, prime_bank];
+        let _ = handle.write_bulk(0x04, &prime_cmd, TIMEOUT);
+        std::thread::sleep(Duration::from_millis(150));
+        let mut phantom = [0u8; 64];
+        let _ = handle.read_bulk(0x82, &mut phantom, Duration::from_secs(1));
     }
 
     let cmd_ep = 0x04;
@@ -1169,26 +1383,28 @@ fn cmd_dump(
             }
         }
     } else {
-        // Reliable non-pipelined EP4 bulk protocol.
-        // Matches the behavior of `cart-read` and the GUI's small-read path.
+        // Non-pipelined: the firmware prefetches; send cmd addr+64 ahead so the
+        // current chunk is already buffered and available to read immediately.
+        // The prime already loaded ROM[start_addr]; each cmd loads the NEXT chunk.
         let mut last_pct = 0u32;
         for chunk in 0..chunk_count {
-            let byte_addr = start_addr + chunk * 64;
-            let word_addr = byte_addr / 2;
-            let addr_16 = (word_addr & 0xFFFF) as u16;
-            let bank = (word_addr >> 16) as u8;
+            let byte_addr = start_addr + chunk * 64;         // what we're reading now
+            let next_addr = start_addr + (chunk + 1) * 64;  // what to prefetch next
+            let next_word = next_addr / 2;
+            let next_a16 = (next_word & 0xFFFF) as u16;
+            let next_bank = (next_word >> 16) as u8;
 
             let cmd = [
                 0x01u8,
-                (addr_16 & 0xFF) as u8,
-                ((addr_16 >> 8) & 0xFF) as u8,
-                bank,
+                (next_a16 & 0xFF) as u8,
+                ((next_a16 >> 8) & 0xFF) as u8,
+                next_bank,
             ];
 
             handle.write_bulk(cmd_ep, &cmd, TIMEOUT)
                 .with_context(|| format!("EP4 ROM write at byte_addr=0x{byte_addr:06X}"))?;
 
-            // 5 ms delay for firmware to process and fill EP2 IN
+            // 5 ms: data is already prefetched; just time for state transition
             std::thread::sleep(Duration::from_millis(5));
 
             let mut buf = [0u8; 64];
@@ -1487,7 +1703,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => cmd_list(),
         Commands::Info => cmd_info(),
-        Commands::FirmwareDownload { firmware, no_cpu } => cmd_firmware_download(&firmware, no_cpu),
+        Commands::FirmwareDownload { firmware, no_cpu, loader_table, force, watch } => cmd_firmware_download(&firmware, no_cpu, &loader_table, force, watch),
         Commands::InitExact { table1, table2 } => cmd_init_exact(&table1, &table2),
         Commands::CartInfo => cmd_cart_info(),
         Commands::ResetCart => cmd_reset_cart(),
@@ -1509,14 +1725,35 @@ fn main() -> Result<()> {
             addr,
             count,
             save_type,
+            read_cmd,
+            inner_cmd,
+            no_select,
+            allow_unverified,
             output,
-        } => cmd_save_read(addr, count, save_type, output),
+            byte_addr,
+        } => cmd_save_read(
+            addr,
+            count,
+            save_type,
+            read_cmd,
+            inner_cmd,
+            no_select,
+            allow_unverified,
+            output,
+            !byte_addr,
+        ),
         Commands::Reset => cmd_reset(),
         Commands::Probe { request, value } => cmd_probe(request, value),
         Commands::RamRead { address } => cmd_ram_read(address),
         Commands::RamWrite { address, value } => cmd_ram_write(address, value),
         Commands::PassiveRead => cmd_passive_read(),
         Commands::BulkTest => cmd_bulk_test(),
+        Commands::ProbeEeprom {
+            cmds,
+            inners,
+            with_select,
+            timeout_ms,
+        } => cmd_probe_eeprom(&cmds, &inners, with_select, timeout_ms),
         Commands::SaveWrite {
             input,
             addr,
@@ -1683,5 +1920,104 @@ fn cmd_fpga_write(fpga_addr: u8, value: u8) -> Result<()> {
         Err(e) => println!("  Read-back: {e}"),
     }
 
+    Ok(())
+}
+
+fn parse_hex_list(s: &str) -> Vec<u8> {
+    s.split(',')
+        .filter_map(|tok| {
+            let t = tok.trim();
+            if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                u8::from_str_radix(h, 16).ok()
+            } else {
+                t.parse::<u8>().ok()
+            }
+        })
+        .collect()
+}
+
+fn open_device_handle() -> Result<rusb::DeviceHandle<GlobalContext>> {
+    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+    let handle = device.open()?;
+    let config = device.active_config_descriptor()?;
+    for iface in config.interfaces() {
+        for iface_desc in iface.descriptors() {
+            let _ = handle.claim_interface(iface_desc.interface_number());
+        }
+    }
+    for ep in 0x01u8..=0x07u8 {
+        let _ = handle.clear_halt(ep);
+        let _ = handle.clear_halt(ep | 0x80);
+    }
+    Ok(handle)
+}
+
+fn cmd_probe_eeprom(cmds: &str, inners: &str, with_select: bool, timeout_ms: u64) -> Result<()> {
+    let cmd_bytes = parse_hex_list(cmds);
+    let inner_bytes = parse_hex_list(inners);
+    let timeout = Duration::from_millis(timeout_ms);
+    let cmd_ep = 0x04u8;
+    let data_ep = 0x82u8;
+
+    println!("ProbeEeprom: {} cmd × {} inner = {} combos  with_select={with_select}  timeout={timeout_ms}ms",
+        cmd_bytes.len(), inner_bytes.len(), cmd_bytes.len() * inner_bytes.len());
+    println!("{:<10} {:<10} {:<8} {}", "read_cmd", "inner", "bytes", "hex (first 16)");
+    println!("{}", "-".repeat(70));
+
+    for &read_cmd in &cmd_bytes {
+        for &inner in &inner_bytes {
+            // Fresh handle each attempt — recovers from any stuck endpoint state
+            let handle = match open_device_handle() {
+                Ok(h) => h,
+                Err(e) => {
+                    println!("0x{read_cmd:02X}       0x{inner:02X}       OPEN_FAIL ({e})");
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+            };
+
+            if with_select {
+                let sel = [0x14u8, inner, 0x00];
+                if handle.write_bulk(cmd_ep, &sel, timeout).is_err() {
+                    println!("0x{read_cmd:02X}       0x{inner:02X}       WRITE_FAIL (select)");
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
+            // Try 4-byte packet (inner=0xFF sentinel means skip 5th byte)
+            let cmd: &[u8] = if inner == 0xFF {
+                &[read_cmd, 0x00u8, 0x00u8, 0x00u8]
+            } else {
+                &[read_cmd, 0x00u8, 0x00u8, 0x00u8, inner]
+            };
+            if handle.write_bulk(cmd_ep, cmd, timeout).is_err() {
+                println!("0x{read_cmd:02X}       0x{inner:02X}       WRITE_FAIL (read cmd)");
+                continue;
+            }
+
+            let mut buf = [0u8; 64];
+            match handle.read_bulk(data_ep, &mut buf, timeout) {
+                Ok(len) => {
+                    let hex: String = buf[..len.min(16)]
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let all_ff = buf[..len].iter().all(|&b| b == 0xFF);
+                    let all_zero = buf[..len].iter().all(|&b| b == 0x00);
+                    let flag = if all_ff { " [all FF]" } else if all_zero { " [all 00]" } else { " [DATA]" };
+                    println!("0x{read_cmd:02X}       0x{inner:02X}       {len:<8} {hex}{flag}");
+                }
+                Err(e) => {
+                    println!("0x{read_cmd:02X}       0x{inner:02X}       TIMEOUT  ({e})");
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    println!("\nDone. Look for [DATA] rows — those cmd/inner combos returned non-trivial bytes.");
     Ok(())
 }
