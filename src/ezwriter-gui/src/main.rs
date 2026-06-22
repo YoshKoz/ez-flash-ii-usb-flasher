@@ -24,6 +24,13 @@ fn main() -> eframe::Result<()> {
                 }
                 return cmd_dump_full(&args[2]);
             }
+            "--dump-save" => {
+                if args.len() < 3 {
+                    eprintln!("usage: ezwriter-gui.exe --dump-save <output_path>");
+                    std::process::exit(1);
+                }
+                return cmd_dump_save(&args[2]);
+            }
             "--dangerous-probe-addresses-i-accept-hardware-lockup-risk" => {
                 return cmd_probe_addresses();
             }
@@ -519,6 +526,40 @@ fn cmd_dump_smoke(path: &str) -> eframe::Result<()> {
     file.sync_all().expect("sync_all");
     eprintln!("[dump-smoke] DONE path={}", path);
     Ok(())
+}
+
+/// Headless FLASH 128KB save dump — exercises the same device::read_flash128_save
+/// path the GUI "Dump Save" button uses (Read Save tab, FLASH 128K carts).
+fn cmd_dump_save(path: &str) -> eframe::Result<()> {
+    use std::io::Write;
+    eprintln!("[dump-save] build: {}", BUILD_STAMP);
+    eprintln!("[dump-save] output: {}", path);
+    match device::read_flash128_save(|read, tot| {
+        if read % (32 * 1024) == 0 {
+            eprintln!("[dump-save] {} / {} bytes", read, tot);
+        }
+    }) {
+        Ok(data) => {
+            eprintln!("[dump-save] read {} bytes", data.len());
+            eprintln!(
+                "[dump-save] Gen3 signatures: {}",
+                device::gen3_save_signature_count(&data)
+            );
+            if let Err(e) = device::validate_save_dump(&data, "FLASH 128K") {
+                eprintln!("[dump-save] VALIDATION FAILED: {e}");
+                std::process::exit(1);
+            }
+            let mut f = std::fs::File::create(path).expect("create");
+            f.write_all(&data).expect("write");
+            f.flush().expect("flush");
+            eprintln!("[dump-save] SUCCESS, wrote {}", path);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("[dump-save] FAILED: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn cmd_dump_full(path: &str) -> eframe::Result<()> {
