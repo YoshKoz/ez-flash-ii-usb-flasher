@@ -48,14 +48,14 @@ pub const GAME_DB: &[GameDBEntry] = &[
     },
     GameDBEntry {
         code: "AXVE",
-        title: "Pokemon Sapphire",
-        save_type: "EEPROM 512",
+        title: "Pokemon Ruby",
+        save_type: "FLASH 128K",
         rom_size: 0x1000000,
     },
     GameDBEntry {
         code: "AXPE",
-        title: "Pokemon Ruby",
-        save_type: "EEPROM 512",
+        title: "Pokemon Sapphire",
+        save_type: "FLASH 128K",
         rom_size: 0x1000000,
     },
     GameDBEntry {
