@@ -223,6 +223,39 @@ The tool `tools/save_probe.py` tests all these strategies:
 | 6 | 0x01 (ROM read) at SRAM offset | Save data found at specific offset |
 | 7 | 0x1A register reads at key addresses | Reveals register values for debugging |
 
+## Save Access Protocol (CONFIRMED 2026-06 — 128KB FLASH)
+
+Solved for genuine 128KB GBA FLASH carts (Pokémon Gen 3, **Macronix MX29L010,
+JEDEC C2:09**). The hypothesized methods above all fail because the save chip is
+on the GBA **/CS2** line, unreachable from the ROM bus (cmd 0x01) or the EZ-Flash
+CPLD register writes (cmd 0x19). The save is only reachable through the firmware's
+native save commands:
+
+| Cmd | Packet | Meaning |
+|-----|--------|---------|
+| 0x14 | `[14, 0x66, 0]` | select FLASH save handler |
+| 0x20 | `[20, alo, ahi, data]` | write one byte `data` to save addr `ahi:alo` |
+| 0x03 | `[03, alo, ahi, 0, 0]` | stream 64 bytes from save addr `ahi:alo` (16-bit, one 64KB bank) |
+| 0x21 | `[21, alo, ahi]` | read one byte (for JEDEC ID) |
+
+The flash is two 64KB banks switched by a JEDEC **command** (not an address pin):
+`AA→0x5555, 55→0x2AAA, B0→0x5555, bank→0x0000` (via cmd 0x20). Reset to read-array
+with `…, F0→0x5555`. Powered-up flash starts in read-array mode.
+
+**Dump procedure** (`read_flash128_native` in `ezwriter-cli`):
+1. `cmd 0x14` select FLASH.
+2. For each bank 0,1: switch bank, then read addr 0..0xFFFF in 64-byte `cmd 0x03`
+   frames (store bank 1 at output offset 0x10000).
+3. On exit, restore bank 0 + read-array (F0).
+
+**Pitfall:** `cmd 0x02` (the old save-read) runs a firmware toggle-bit poll that
+**infinite-hangs** the 8051 when the flash is not in read-array mode (only a
+physical replug recovers). Use `cmd 0x03`-only reads and always restore F0.
+
+Verified: full 128KB Pokémon Sapphire dump, both Gen 3 save slots intact (14
+contiguous sections each, active slot saveidx newer). CLI and GUI produce
+byte-identical output.
+
 ## Cartridge Interface
 
 The EZ-Flash II cartridge uses:
