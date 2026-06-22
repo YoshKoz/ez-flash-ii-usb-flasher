@@ -123,6 +123,50 @@ Firmware handles:
 | 0x30 | ERASE_SECTOR | Erase flash sector |
 | 0x40 | VERIFY | Verify written data |
 
+### CONFIRMED protocol (firmware RE, 2026-06-22)
+
+Reverse-engineered from the **patched** 8051 image (`an2131_fw_v2.bin` + `loader_table1.bin`
++ `loader_table2.bin` applied at their patch addresses — the loader tables contain the
+actual cart-bus routines, so an unpatched image cannot talk to the cart at all).
+Endpoints: **EP4 OUT** (commands), **EP2 IN / 0x82** (64-byte data frames).
+
+Command dispatch is a Keil switch at `0x0733 (LCALL 0x15CE)`, keyed on the command byte
+stored at XDATA `0x7CC0`. Case table at `0x0736`, record format `[addrHi, addrLo, caseval]`,
+terminated by `00 00` then a default handler address.
+
+| Cmd | Handler | Packet | Meaning |
+|-----|---------|--------|---------|
+| 0x01 | 0x075E | `[01, wlo, wmid, bank]` | ROM read, 24-bit **word** address (byte/2), streams 64 B, prefetched |
+| 0x02 | 0x07B7 | `[02, alo, ahi, bank, type]` | Save setup + flash-ready toggle poll (`type` 0x66=FLASH @0x114A, 0x68, 0x65=EEPROM). **Hangs if flash not in read-array mode.** |
+| 0x03 | 0x0A09 | `[03, alo, ahi, 0, 0]` | Stream **64 bytes** from save chip at 16-bit byte addr `ahi:alo` (one 64KB bank). Sets save chip-select itself. |
+| 0x14 | 0x0AE1 | `[14, type, 0]` | Select save type/handler |
+| 0x19 | 0x0AF3 | `[19, alo, amid, ahi, dlo, dhi]` | 16-bit **write** to ROM bus word address (JEDEC/CPLD) |
+| 0x20 | 0x0BA3 | `[20, alo, ahi, data]` | **Write one byte** `data` to save chip addr `ahi:alo` |
+| 0x21 | 0x0BDF | `[21, alo, ahi]` | Read one byte from save chip addr `ahi:alo` |
+
+Cart-bus I/O is via AN2131 XDATA ports: `0x7F96/0x7F97` = address low/high latch,
+`0x7F98` = strobe/control (0x9B latch, 0x89/0x8B read, 0x97/0xBF write, 0xB7/0xB5 read),
+`0x7F99` = data-in, `0x7F9C/0x7F9D` = chip-select/mode.
+
+### Dumping a 128KB GBA FLASH save (e.g. Pokémon Gen 3)
+
+Save chip sits on GBA **/CS2** (8-bit), NOT the ROM bus — reachable only through the
+native save commands above. Pokémon Sapphire = **Macronix MX29L010, JEDEC C2:09**,
+two 64KB banks switched by a JEDEC **command** (no address pin).
+
+1. `cmd 0x14 [14,0x66,0]` — select FLASH handler.
+2. For each bank (0,1): switch bank with `cmd 0x20` writes
+   `AA→0x5555, 55→0x2AAA, B0→0x5555, bank→0x0000`.
+3. Read the bank in 64-byte frames: `cmd 0x03 [03, alo, ahi, 0, 0]` for `addr` 0..0xFFFF.
+   Store bank 1 at output offset 0x10000.
+4. On exit restore read-array: `AA→0x5555, 55→0x2AAA, F0→0x5555` (and bank 0).
+
+JEDEC ID check: `AA→0x5555, 55→0x2AAA, 90→0x5555` then read byte 0x0000 (mfr) / 0x0001
+(device); reset with F0. Use **`cmd 0x03`-only** for reads — it skips the `cmd 0x02`
+toggle-poll that infinite-hangs the firmware when the flash is in a command state
+(recovery from that hang requires a physical replug). Implemented in
+`read_flash128_save` in `src/ezwriter-cli/src/main.rs`.
+
 ### Status response
 
 EZClient string: `Status:[1]0x%x [2]0x%x [3]0x%x [4]0x%x`
