@@ -1,6 +1,7 @@
 ﻿use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use rusb::{Device, DeviceDescriptor, DeviceHandle, Direction, GlobalContext};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -1034,6 +1035,12 @@ fn cmd_save_read(
     let cmd_ep = 0x04;
     let data_ep = 0x82;
 
+    // Genuine GBA carts (e.g. Pokémon) need the firmware-native save path, not
+    // the EZ-Flash II CPLD unlock. Route FLASH saves to the native reader.
+    if matches!(save_type, 'f' | 'F') {
+        return read_flash128_save(&handle, cmd_ep, data_ep, output, allow_unverified, save_type);
+    }
+
     // Unlock EZ-Flash II CPLD before save-chip access (asie unlock sequence).
     // Without this, the save chip is gated off and every read returns the same
     // stale 128-byte buffer regardless of address.
@@ -1068,6 +1075,12 @@ fn cmd_save_read(
     for _ in 0..8 {
         let mut drain = [0u8; 64];
         if handle.read_bulk(data_ep, &mut drain, Duration::from_millis(200)).is_err() { break; }
+    }
+
+    // FLASH128: cmd 0x02/0x66 is a write-completion poll, not a read command.
+    // Use bank-switch JEDEC writes + cmd 0x01 ROM pipeline reads instead.
+    if inner_cmd == Some(0x66) {
+        return read_flash128_save(&handle, cmd_ep, data_ep, output, allow_unverified, save_type);
     }
 
     let mut cart_data = Vec::new();
@@ -1338,6 +1351,14 @@ fn cmd_dump(
 
     if fast {
         println!("  FAST pipelined mode — overlapping writes/reads (Experimental)");
+        let pb = ProgressBar::new(total_size as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "  [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
         // Pipeline depth 2: write next command while reading previous response
         let mut prev_buf: Option<[u8; 64]> = None;
         for chunk in 0..=chunk_count {
@@ -1367,13 +1388,7 @@ fn cmd_dump(
                 match handle.read_bulk(data_ep, &mut buf, Duration::from_millis(500)) {
                     Ok(_len) => {
                         prev_buf = Some(buf);
-                        if chunk % 256 == 0 && chunk > 0 {
-                            let pct = (chunk * 100) / chunk_count;
-                            let addr_mb = (start_addr + chunk * 64) as f64 / (1024.0 * 1024.0);
-                            print!("\r  Progress: {}% ({:.1} MB)", pct, addr_mb);
-                            use std::io::Write;
-                            std::io::stdout().flush()?;
-                        }
+                        pb.inc(64);
                     }
                     Err(e) => {
                         println!("\n  ERROR at chunk {}: read_bulk: {e}", chunk);
@@ -1386,7 +1401,14 @@ fn cmd_dump(
         // Non-pipelined: the firmware prefetches; send cmd addr+64 ahead so the
         // current chunk is already buffered and available to read immediately.
         // The prime already loaded ROM[start_addr]; each cmd loads the NEXT chunk.
-        let mut last_pct = 0u32;
+        let pb = ProgressBar::new(total_size as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "  [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
         for chunk in 0..chunk_count {
             let byte_addr = start_addr + chunk * 64;         // what we're reading now
             let next_addr = start_addr + (chunk + 1) * 64;  // what to prefetch next
@@ -1411,27 +1433,137 @@ fn cmd_dump(
             match handle.read_bulk(data_ep, &mut buf, Duration::from_secs(3)) {
                 Ok(len) => {
                     file.write_all(&buf[..len])?;
+                    pb.inc(len as u64);
                 }
                 Err(e) => {
                     println!("\n  ERROR at chunk {chunk}: read_bulk: {e}");
                     break;
                 }
             }
-
-            let pct = (chunk * 100) / chunk_count;
-            if pct != last_pct {
-                last_pct = pct;
-                let addr_mb = byte_addr as f64 / (1024.0 * 1024.0);
-                print!("\r  Progress: {pct}% ({addr_mb:.1} MB)");
-                use std::io::Write;
-                std::io::stdout().flush()?;
-            }
         }
+        pb.finish_and_clear();
     }
-    println!();
 
     let file_size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
     println!("  Dumped {} bytes to {}", file_size, output.display());
+    Ok(())
+}
+
+fn read_flash128_save(
+    handle: &DeviceHandle<GlobalContext>,
+    cmd_ep: u8,
+    data_ep: u8,
+    output: Option<PathBuf>,
+    allow_unverified: bool,
+    save_type: char,
+) -> Result<()> {
+    // Read a genuine 128KB GBA FLASH save (e.g. Pokémon Gen 3, Macronix MX29L010
+    // ID C2:09 / Sanyo). The save chip sits on the cartridge /CS2 line, NOT the
+    // ROM bus, so it can only be reached through the firmware's native save path:
+    //
+    //   cmd 0x14 [14,0x66,0]            select FLASH save handler (done by caller)
+    //   cmd 0x20 [20,alo,ahi,data]      write one byte `data` to save addr ahi:alo
+    //   cmd 0x03 [03,alo,ahi,0,0]       stream 64 bytes from save addr ahi:alo
+    //
+    // The flash is two 64KB banks switched by a JEDEC command (not an address
+    // pin). Switch with: AA->0x5555, 55->0x2AAA, B0->0x5555, bank->0x0000.
+    // Powered-up flash is already in read-array mode; we restore it with F0 on exit.
+    const BYTES_PER_BANK: usize = 65536;
+
+    let fwrite = |addr: u16, data: u8| -> Result<()> {
+        handle.write_bulk(cmd_ep, &[0x20u8, (addr & 0xFF) as u8, (addr >> 8) as u8, data], TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(4));
+        Ok(())
+    };
+    let drain = || {
+        let mut buf = [0u8; 64];
+        for _ in 0..64 {
+            if handle.read_bulk(data_ep, &mut buf, Duration::from_millis(40)).is_err() { break; }
+        }
+    };
+
+    // Select the FLASH save handler (sets the firmware's save chip-select mode).
+    handle.write_bulk(cmd_ep, &[0x14u8, 0x66, 0x00], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(50));
+    drain();
+    let bank_switch = |bank: u8| -> Result<()> {
+        fwrite(0x5555, 0xAA)?;
+        fwrite(0x2AAA, 0x55)?;
+        fwrite(0x5555, 0xB0)?;
+        fwrite(0x0000, bank)?;
+        std::thread::sleep(Duration::from_millis(10));
+        Ok(())
+    };
+
+    let pb = ProgressBar::new((BYTES_PER_BANK * 2) as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+        )
+        .unwrap()
+        .progress_chars("=> "),
+    );
+
+    let mut save_data: Vec<u8> = Vec::with_capacity(BYTES_PER_BANK * 2);
+
+    for bank in 0u8..=1 {
+        bank_switch(bank)?;
+        for off in (0..BYTES_PER_BANK as u32).step_by(64) {
+            drain();
+            // cmd 0x03 selects the save chip and streams 64 bytes at addr (ahi:alo).
+            handle
+                .write_bulk(cmd_ep, &[0x03u8, (off & 0xFF) as u8, ((off >> 8) & 0xFF) as u8, 0x00, 0x00], TIMEOUT)
+                .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
+            std::thread::sleep(Duration::from_millis(8));
+
+            let mut buf = [0u8; 64];
+            match handle.read_bulk(data_ep, &mut buf, Duration::from_secs(3)) {
+                Ok(len) => {
+                    save_data.extend_from_slice(&buf[..len]);
+                    pb.inc(len as u64);
+                }
+                Err(e) => {
+                    pb.abandon_with_message(format!("bank{bank} off 0x{off:04X}: {e}"));
+                    // Leave flash in read-array mode before bailing.
+                    let _ = bank_switch(0);
+                    let _ = fwrite(0x5555, 0xAA);
+                    let _ = fwrite(0x2AAA, 0x55);
+                    let _ = fwrite(0x5555, 0xF0);
+                    bail!("FLASH128 read error at bank{bank} off 0x{off:04X}: {e}");
+                }
+            }
+        }
+    }
+
+    // Restore bank 0 + read-array (F0) so the cart is left in a clean state.
+    bank_switch(0)?;
+    fwrite(0x5555, 0xAA)?;
+    fwrite(0x2AAA, 0x55)?;
+    fwrite(0x5555, 0xF0)?;
+
+    pb.finish_and_clear();
+    println!("  Read {} bytes", save_data.len());
+    println!(
+        "  Gen 3 save signatures: {}",
+        gen3_save_signature_count(&save_data)
+    );
+
+    if let Some(path) = output {
+        if let Err(error) = validate_save_dump(&save_data, save_type) {
+            if allow_unverified {
+                println!("  WARNING: writing unverified save dump: {error}");
+            } else {
+                bail!(
+                    "{}. Refusing to write {}; pass --allow-unverified only for protocol experiments",
+                    error,
+                    path.display()
+                );
+            }
+        }
+        fs::write(&path, &save_data).context("writing save file")?;
+        println!("  Wrote to {}", path.display());
+    }
+
     Ok(())
 }
 
