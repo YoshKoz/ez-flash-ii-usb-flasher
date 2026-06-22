@@ -772,6 +772,95 @@ pub fn read_save_with_type(byte_addr: u32, count: u32, save_type: &str) -> Resul
     Ok(all)
 }
 
+/// Read a genuine 128KB GBA FLASH save (e.g. Pokémon Gen 3, Macronix MX29L010
+/// C2:09) via the firmware-native save path. The save chip is on GBA /CS2 and is
+/// only reachable through cmd 0x14 (select) + cmd 0x20 (byte write) + cmd 0x03
+/// (read 64). The flash is two 64KB banks switched by a JEDEC command, not an
+/// address pin. Returns 131072 bytes; leaves the flash in read-array mode.
+pub fn read_flash128_save(cb: impl Fn(u64, u64)) -> Result<Vec<u8>> {
+    let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+    const BYTES_PER_BANK: u32 = 65536;
+    let total = (BYTES_PER_BANK * 2) as u64;
+
+    let fwrite = |addr: u16, data: u8| -> Result<()> {
+        handle.write_bulk(
+            CMD_EP,
+            &[0x20u8, (addr & 0xFF) as u8, (addr >> 8) as u8, data],
+            TIMEOUT,
+        )?;
+        std::thread::sleep(Duration::from_millis(4));
+        Ok(())
+    };
+    let drain = || {
+        let mut buf = [0u8; 64];
+        for _ in 0..64 {
+            if handle
+                .read_bulk(DATA_EP, &mut buf, Duration::from_millis(40))
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    let bank_switch = |bank: u8| -> Result<()> {
+        fwrite(0x5555, 0xAA)?;
+        fwrite(0x2AAA, 0x55)?;
+        fwrite(0x5555, 0xB0)?;
+        fwrite(0x0000, bank)?;
+        std::thread::sleep(Duration::from_millis(10));
+        Ok(())
+    };
+
+    // Select the FLASH save handler.
+    handle.write_bulk(CMD_EP, &[0x14u8, 0x66, 0x00], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(50));
+    drain();
+
+    let mut all = Vec::with_capacity((BYTES_PER_BANK * 2) as usize);
+    for bank in 0u8..=1 {
+        bank_switch(bank)?;
+        let mut off = 0u32;
+        while off < BYTES_PER_BANK {
+            drain();
+            handle
+                .write_bulk(
+                    CMD_EP,
+                    &[0x03u8, (off & 0xFF) as u8, ((off >> 8) & 0xFF) as u8, 0x00, 0x00],
+                    TIMEOUT,
+                )
+                .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
+            std::thread::sleep(Duration::from_millis(8));
+
+            let mut buf = [0u8; 64];
+            match handle.read_bulk(DATA_EP, &mut buf, Duration::from_secs(3)) {
+                Ok(len) => {
+                    all.extend_from_slice(&buf[..len]);
+                    cb(all.len() as u64, total);
+                }
+                Err(e) => {
+                    // Leave flash in read-array mode before bailing.
+                    let _ = bank_switch(0);
+                    let _ = fwrite(0x5555, 0xAA);
+                    let _ = fwrite(0x2AAA, 0x55);
+                    let _ = fwrite(0x5555, 0xF0);
+                    return Err(anyhow::anyhow!(
+                        "FLASH128 read error at bank{bank} off 0x{off:04X}: {e}"
+                    ));
+                }
+            }
+            off += 64;
+        }
+    }
+
+    // Restore bank 0 + read-array (F0).
+    bank_switch(0)?;
+    fwrite(0x5555, 0xAA)?;
+    fwrite(0x2AAA, 0x55)?;
+    fwrite(0x5555, 0xF0)?;
+
+    Ok(all)
+}
+
 fn save_read_handler_byte(save_type: &str) -> u8 {
     if save_type.contains("EEPROM") {
         0x65 // XRL #0x65 branch at 0x07FF in tusbez.bin
