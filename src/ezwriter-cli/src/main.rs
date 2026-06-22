@@ -956,6 +956,22 @@ fn cmd_save_read(
     let data_ep = 0x82;
     let suffix = save_type as u8;
 
+    // Default path for FLASH saves: firmware-native two-bank reader. The save chip
+    // is on GBA /CS2 and is only reachable via cmd 0x14/0x20/0x03 (not the ROM bus).
+    // The experimental --reg / --rom-read methods are kept for protocol research.
+    if matches!(save_type, 'f' | 'F') && !use_rom_read && !use_reg {
+        println!("Method: native FLASH (0x14 select + 0x20 bank switch + 0x03 read)");
+        let data = read_flash128_native(&handle, cmd_ep, data_ep)?;
+        println!("  Read {} bytes", data.len());
+        println!("  Gen3 save signatures: {}", gen3_sig_count(&data));
+        if let Some(path) = output {
+            fs::write(&path, &data)?;
+            println!("Wrote {} bytes to {}", data.len(), path.display());
+        }
+        println!("Total: {} bytes", data.len());
+        return Ok(());
+    }
+
     if use_rom_read {
         println!("Method: rom_read (0x01) at offset 0x{rom_offset:X}");
         let data = save_read_via_rom_read(&handle, data_ep, cmd_ep, byte_addr, count, rom_offset, suffix)?;
@@ -988,6 +1004,79 @@ fn cmd_save_read(
     }
     println!("Total: {} bytes", data.len());
     Ok(())
+}
+
+fn gen3_sig_count(data: &[u8]) -> usize {
+    const SIG: [u8; 4] = [0x25, 0x20, 0x01, 0x08];
+    data.windows(4).filter(|w| **w == SIG).count()
+}
+
+/// Read a genuine 128KB GBA FLASH save (e.g. Pokémon Gen 3, Macronix MX29L010
+/// C2:09) via the firmware-native save path. The save chip is on GBA /CS2 and is
+/// only reachable through cmd 0x14 (select) + cmd 0x20 (byte write) + cmd 0x03
+/// (read 64). Two 64KB banks switched by a JEDEC command (AA/55/B0/bank), not an
+/// address pin. Returns 131072 bytes; restores read-array mode (F0) on exit.
+fn read_flash128_native(
+    handle: &DeviceHandle<GlobalContext>,
+    cmd_ep: u8,
+    data_ep: u8,
+) -> Result<Vec<u8>> {
+    const BYTES_PER_BANK: u32 = 65536;
+
+    let fwrite = |addr: u16, data: u8| -> Result<()> {
+        handle.write_bulk(cmd_ep, &[0x20u8, (addr & 0xFF) as u8, (addr >> 8) as u8, data], TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(4));
+        Ok(())
+    };
+    let drain = || {
+        let mut buf = [0u8; 64];
+        for _ in 0..64 {
+            if handle.read_bulk(data_ep, &mut buf, Duration::from_millis(40)).is_err() { break; }
+        }
+    };
+    let bank_switch = |bank: u8| -> Result<()> {
+        fwrite(0x5555, 0xAA)?;
+        fwrite(0x2AAA, 0x55)?;
+        fwrite(0x5555, 0xB0)?;
+        fwrite(0x0000, bank)?;
+        std::thread::sleep(Duration::from_millis(10));
+        Ok(())
+    };
+
+    handle.write_bulk(cmd_ep, &[0x14u8, 0x66, 0x00], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(50));
+    drain();
+
+    let mut all = Vec::with_capacity((BYTES_PER_BANK * 2) as usize);
+    for bank in 0u8..=1 {
+        bank_switch(bank)?;
+        let mut off = 0u32;
+        while off < BYTES_PER_BANK {
+            drain();
+            handle
+                .write_bulk(cmd_ep, &[0x03u8, (off & 0xFF) as u8, ((off >> 8) & 0xFF) as u8, 0x00, 0x00], TIMEOUT)
+                .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
+            std::thread::sleep(Duration::from_millis(8));
+            let mut buf = [0u8; 64];
+            match handle.read_bulk(data_ep, &mut buf, Duration::from_secs(3)) {
+                Ok(len) => all.extend_from_slice(&buf[..len]),
+                Err(e) => {
+                    let _ = bank_switch(0);
+                    let _ = fwrite(0x5555, 0xAA);
+                    let _ = fwrite(0x2AAA, 0x55);
+                    let _ = fwrite(0x5555, 0xF0);
+                    bail!("FLASH128 read error at bank{bank} off 0x{off:04X}: {e}");
+                }
+            }
+            off += 64;
+        }
+    }
+
+    bank_switch(0)?;
+    fwrite(0x5555, 0xAA)?;
+    fwrite(0x2AAA, 0x55)?;
+    fwrite(0x5555, 0xF0)?;
+    Ok(all)
 }
 
 /// Probe all save read strategies

@@ -48,14 +48,14 @@ pub const GAME_DB: &[GameDBEntry] = &[
     },
     GameDBEntry {
         code: "AXVE",
-        title: "Pokemon Sapphire",
-        save_type: "EEPROM 512",
+        title: "Pokemon Ruby",
+        save_type: "FLASH 128K",
         rom_size: 0x1000000,
     },
     GameDBEntry {
         code: "AXPE",
-        title: "Pokemon Ruby",
-        save_type: "EEPROM 512",
+        title: "Pokemon Sapphire",
+        save_type: "FLASH 128K",
         rom_size: 0x1000000,
     },
     GameDBEntry {
@@ -386,7 +386,6 @@ impl CartSession {
     /// Open device, claim interface, clear halts, and issue JEDEC reset.
     pub fn open() -> Result<Self> {
         let (_, handle, _) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
-        reset_jedec(&handle);
         Ok(Self { handle })
     }
 
@@ -399,11 +398,13 @@ impl CartSession {
     /// Use `read_rom_chunk_ep0` for full 16 MB access.
     pub fn read_rom_chunk(&self, byte_addr: u32) -> Result<[u8; 64]> {
         let word_addr = byte_addr / 2;
+        let addr_16 = (word_addr & 0xFFFF) as u16;
+        let bank = (word_addr >> 16) as u8;
         let cmd = [
             0x01,
-            (word_addr & 0xFF) as u8,
-            ((word_addr >> 8) & 0xFF) as u8,
-            0x00,
+            (addr_16 & 0xFF) as u8,
+            ((addr_16 >> 8) & 0xFF) as u8,
+            bank,
         ];
 
         self.handle
@@ -526,7 +527,7 @@ impl CartSession {
         let mut header_validated = false;
 
         while written < rom_size {
-            let chunk = self.read_rom_chunk_ep0(start_offset + written as u32)?;
+            let chunk = self.read_rom_chunk(start_offset + written as u32)?;
 
             if !header_validated {
                 eprintln!(
@@ -708,8 +709,194 @@ pub fn read_chunks(cmd_byte: u8, suffix: u8, byte_addr: u32, count: u32) -> Resu
     Ok(all)
 }
 
-pub fn read_save(byte_addr: u32, count: u32) -> Result<Vec<u8>> {
-    read_chunks(2, 0x66, byte_addr, count)
+fn write_reg(handle: &DeviceHandle<GlobalContext>, addr: u32, data: u16) -> Result<()> {
+    let buf = [
+        0x19u8,
+        (addr & 0xFF) as u8,
+        ((addr >> 8) & 0xFF) as u8,
+        ((addr >> 16) & 0xFF) as u8,
+        (data & 0xFF) as u8,
+        ((data >> 8) & 0xFF) as u8,
+    ];
+    handle.write_bulk(CMD_EP, &buf, TIMEOUT)?;
+    Ok(())
+}
+
+pub fn read_save_with_type(byte_addr: u32, count: u32, save_type: &str) -> Result<Vec<u8>> {
+    let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+
+    // Unlock EZ-Flash II CPLD before save-chip access. Without this, the save
+    // chip is gated off and every read returns the same stale 128-byte buffer.
+    write_reg(&handle, 0x9FE000, 0xD200)?;
+    write_reg(&handle, 0x800000, 0x1500)?;
+    write_reg(&handle, 0x802000, 0xD200)?;
+    write_reg(&handle, 0x804000, 0x1500)?;
+
+    let suffix = save_read_handler_byte(save_type);
+    let select = [0x14u8, suffix, 0x00];
+    let _ = handle.write_bulk(CMD_EP, &select, Duration::from_millis(1000));
+    std::thread::sleep(Duration::from_millis(100));
+
+    // Drain stale EP2 data (firmware auto-streams 8 packets; all must be consumed
+    // before save-chip data is reliable).
+    for _ in 0..8 {
+        let mut drain = [0u8; 64];
+        if handle.read_bulk(DATA_EP, &mut drain, Duration::from_millis(200)).is_err() { break; }
+    }
+
+    let mut all = Vec::with_capacity((count * 64) as usize);
+    for chunk in 0..count {
+        let addr = byte_addr + chunk * 64;
+        let cmd = [
+            0x02u8,
+            (addr & 0xFF) as u8,
+            ((addr >> 8) & 0xFF) as u8,
+            ((addr >> 16) & 0xFF) as u8,
+            suffix,
+        ];
+        handle
+            .write_bulk(CMD_EP, &cmd, TIMEOUT)
+            .with_context(|| format!("save read write at addr=0x{addr:06X}"))?;
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut buf = [0u8; 64];
+        let len = handle
+            .read_bulk(DATA_EP, &mut buf, Duration::from_secs(30))
+            .with_context(|| format!("save read at addr=0x{addr:06X}"))?;
+        all.extend_from_slice(&buf[..len]);
+    }
+
+    // Re-lock CPLD (best effort)
+    let _ = write_reg(&handle, 0x9FC000, 0x1500);
+
+    Ok(all)
+}
+
+/// Read a genuine 128KB GBA FLASH save (e.g. Pokémon Gen 3, Macronix MX29L010
+/// C2:09) via the firmware-native save path. The save chip is on GBA /CS2 and is
+/// only reachable through cmd 0x14 (select) + cmd 0x20 (byte write) + cmd 0x03
+/// (read 64). The flash is two 64KB banks switched by a JEDEC command, not an
+/// address pin. Returns 131072 bytes; leaves the flash in read-array mode.
+pub fn read_flash128_save(cb: impl Fn(u64, u64)) -> Result<Vec<u8>> {
+    let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+    const BYTES_PER_BANK: u32 = 65536;
+    let total = (BYTES_PER_BANK * 2) as u64;
+
+    let fwrite = |addr: u16, data: u8| -> Result<()> {
+        handle.write_bulk(
+            CMD_EP,
+            &[0x20u8, (addr & 0xFF) as u8, (addr >> 8) as u8, data],
+            TIMEOUT,
+        )?;
+        std::thread::sleep(Duration::from_millis(4));
+        Ok(())
+    };
+    let drain = || {
+        let mut buf = [0u8; 64];
+        for _ in 0..64 {
+            if handle
+                .read_bulk(DATA_EP, &mut buf, Duration::from_millis(40))
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    let bank_switch = |bank: u8| -> Result<()> {
+        fwrite(0x5555, 0xAA)?;
+        fwrite(0x2AAA, 0x55)?;
+        fwrite(0x5555, 0xB0)?;
+        fwrite(0x0000, bank)?;
+        std::thread::sleep(Duration::from_millis(10));
+        Ok(())
+    };
+
+    // Select the FLASH save handler.
+    handle.write_bulk(CMD_EP, &[0x14u8, 0x66, 0x00], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(50));
+    drain();
+
+    let mut all = Vec::with_capacity((BYTES_PER_BANK * 2) as usize);
+    for bank in 0u8..=1 {
+        bank_switch(bank)?;
+        let mut off = 0u32;
+        while off < BYTES_PER_BANK {
+            drain();
+            handle
+                .write_bulk(
+                    CMD_EP,
+                    &[0x03u8, (off & 0xFF) as u8, ((off >> 8) & 0xFF) as u8, 0x00, 0x00],
+                    TIMEOUT,
+                )
+                .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
+            std::thread::sleep(Duration::from_millis(8));
+
+            let mut buf = [0u8; 64];
+            match handle.read_bulk(DATA_EP, &mut buf, Duration::from_secs(3)) {
+                Ok(len) => {
+                    all.extend_from_slice(&buf[..len]);
+                    cb(all.len() as u64, total);
+                }
+                Err(e) => {
+                    // Leave flash in read-array mode before bailing.
+                    let _ = bank_switch(0);
+                    let _ = fwrite(0x5555, 0xAA);
+                    let _ = fwrite(0x2AAA, 0x55);
+                    let _ = fwrite(0x5555, 0xF0);
+                    return Err(anyhow::anyhow!(
+                        "FLASH128 read error at bank{bank} off 0x{off:04X}: {e}"
+                    ));
+                }
+            }
+            off += 64;
+        }
+    }
+
+    // Restore bank 0 + read-array (F0).
+    bank_switch(0)?;
+    fwrite(0x5555, 0xAA)?;
+    fwrite(0x2AAA, 0x55)?;
+    fwrite(0x5555, 0xF0)?;
+
+    Ok(all)
+}
+
+fn save_read_handler_byte(save_type: &str) -> u8 {
+    if save_type.contains("EEPROM") {
+        0x65 // XRL #0x65 branch at 0x07FF in tusbez.bin
+    } else {
+        0x66 // FLASH/SRAM handler, CJNE branch at 0x07D5 in tusbez.bin
+    }
+}
+
+pub fn gen3_save_signature_count(data: &[u8]) -> usize {
+    const GEN3_SIG: [u8; 4] = [0x25, 0x20, 0x01, 0x08];
+    data.windows(GEN3_SIG.len())
+        .filter(|window| **window == GEN3_SIG)
+        .count()
+}
+
+fn starts_with_known_rom_stub(data: &[u8]) -> bool {
+    data.starts_with(&[0xff, 0x07, 0x00, 0x28, 0x0c, 0xd1, 0x10, 0x48])
+        || data.starts_with(&[0xff, 0xef, 0x00, 0x28, 0x0c, 0xd1, 0x10, 0x48])
+}
+
+pub fn validate_save_dump(data: &[u8], save_type: &str) -> Result<()> {
+    if data.is_empty() {
+        bail!("save read returned no data");
+    }
+    if starts_with_known_rom_stub(data) {
+        bail!("save data starts with the known ROM/stale endpoint pattern, not save RAM");
+    }
+    if save_type.contains("FLASH") && data.len() >= 128 * 1024 {
+        let signatures = gen3_save_signature_count(data);
+        if signatures < 14 {
+            bail!(
+                "FLASH save validation failed: found {signatures} Gen 3 section signatures, expected at least 14"
+            );
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
