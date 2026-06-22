@@ -427,20 +427,42 @@ impl EzWriterApp {
                 .map_or("FLASH 128K".to_string(), |h| h.save_type.clone());
             thread::spawn(move || {
                 let sz = save_size_bytes(&save_type);
-                let mut all = Vec::with_capacity(sz);
-                for offset in (0..sz as u32).step_by(0x1000) {
-                    match device::read_save_with_type(offset, 64, &save_type) {
-                        Ok(data) => all.extend(data),
-                        Err(_) => break,
+                // Genuine 128KB GBA FLASH (e.g. Pokémon Gen 3) needs the native
+                // two-bank reader; other types use the generic per-block read.
+                let all = if save_type.contains("FLASH") && sz == 128 * 1024 {
+                    let txp = tx.clone();
+                    match device::read_flash128_save(move |read, tot| {
+                        if read % (64 * 1024) == 0 {
+                            let _ = txp.send(BgCmd::Progress(format!(
+                                "[v] Dumping save... {} / {} KB",
+                                read / 1024,
+                                tot / 1024
+                            )));
+                        }
+                    }) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            let _ = tx.send(BgCmd::Error(e.to_string()));
+                            return;
+                        }
                     }
-                    if all.len() % (64 * 1024) == 0 && !all.is_empty() {
-                        let _ = tx.send(BgCmd::Progress(format!(
-                            "[v] Dumping save... {} / {} KB",
-                            all.len() / 1024,
-                            sz / 1024
-                        )));
+                } else {
+                    let mut all = Vec::with_capacity(sz);
+                    for offset in (0..sz as u32).step_by(0x1000) {
+                        match device::read_save_with_type(offset, 64, &save_type) {
+                            Ok(data) => all.extend(data),
+                            Err(_) => break,
+                        }
+                        if all.len() % (64 * 1024) == 0 && !all.is_empty() {
+                            let _ = tx.send(BgCmd::Progress(format!(
+                                "[v] Dumping save... {} / {} KB",
+                                all.len() / 1024,
+                                sz / 1024
+                            )));
+                        }
                     }
-                }
+                    all
+                };
                 if let Err(e) = device::validate_save_dump(&all, &save_type) {
                     let _ = tx.send(BgCmd::Error(e.to_string()));
                     return;

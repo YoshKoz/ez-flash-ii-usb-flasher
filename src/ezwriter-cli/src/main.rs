@@ -1017,7 +1017,7 @@ fn cmd_save_read(
     no_select: bool,
     allow_unverified: bool,
     output: Option<PathBuf>,
-    word_addr: bool,
+    _word_addr: bool,
 ) -> Result<()> {
     let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
     let handle = device.open()?;
