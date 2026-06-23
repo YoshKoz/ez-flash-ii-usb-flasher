@@ -1,0 +1,335 @@
+=== FLASH128 handler (LCALL 0x114A) ===
+  114A: MOV       [r15],#0x01
+  114D: MOV       [r17],#0x02
+  1150: MOV       [r18],#0x03
+  1153: MOV       [r19],#0x04
+  1156: MOV       A,[r15]  ; direct 0x15
+  1158: CJNE      A,[0x18], 0x1164
+  115B: MOV       A,[r17]  ; direct 0x17
+  115D: XRL       A,[r19]  ; direct 0x19
+  115F: JNZ       0x1164
+  1161: LJMP      0x11F6
+  1164: MOV       DPTR,#0x7F9C
+  1167: MOV       A,#0xFF
+  1169: MOVX      @DPTR,A
+  116A: MOV       DPTR,#0x7F9D
+  116D: MOVX      @DPTR,A
+  116E: MOV       DPTR,#0x7F96
+  1171: MOV       A,[r08]  ; direct 0x08
+  1173: MOVX      @DPTR,A
+  1174: MOV       DPTR,#0x7F98
+  1177: MOV       A,#0xBF
+  1179: MOVX      @DPTR,A
+  117A: MOV       A,#0x9F
+  117C: MOVX      @DPTR,A
+  117D: MOV       DPTR,#0x7F96
+  1180: MOV       A,[r14]  ; direct 0x14
+  1182: MOVX      @DPTR,A
+  1183: MOV       DPTR,#0x7F97
+  1186: MOV       A,[r13]  ; direct 0x13
+  1188: MOVX      @DPTR,A
+  1189: MOV       DPTR,#0x7F98
+  118C: MOV       A,#0x9B
+  118E: MOVX      @DPTR,A
+  118F: CLR       A
+  1190: MOV       DPTR,#0x7F9C
+  1193: MOVX      @DPTR,A
+  1194: MOV       DPTR,#0x7F98
+  1197: MOV       A,#0x89
+  1199: MOVX      @DPTR,A
+  119A: MOV       DPTR,#0x7F99
+  119D: MOVX      A,@DPTR
+  119E: MOV       [0],A  ; direct 0x15
+  11A0: MOV       DPTR,#0x7F98
+  11A3: MOV       A,#0x8B
+  11A5: MOVX      @DPTR,A
+  11A6: MOV       A,#0x89
+  11A8: MOVX      @DPTR,A
+  11A9: MOV       DPTR,#0x7F99
+  11AC: MOVX      A,@DPTR
+  11AD: MOV       [0],A  ; direct 0x17
+  11AF: MOV       DPTR,#0x7F98
+  11B2: MOV       A,#0x9F
+  11B4: MOVX      @DPTR,A
+  11B5: MOV       DPTR,#0x7F9C
+  11B8: MOV       A,#0xFF
+  11BA: MOVX      @DPTR,A
+  11BB: MOV       DPTR,#0x7F96
+  11BE: MOV       A,[r14]  ; direct 0x14
+  11C0: MOVX      @DPTR,A
+  11C1: MOV       DPTR,#0x7F97
+  11C4: MOV       A,[r13]  ; direct 0x13
+  11C6: MOVX      @DPTR,A
+  11C7: MOV       DPTR,#0x7F98
+  11CA: MOV       A,#0x9B
+  11CC: MOVX      @DPTR,A
+  11CD: CLR       A
+  11CE: MOV       DPTR,#0x7F9C
+  11D1: MOVX      @DPTR,A
+  11D2: MOV       DPTR,#0x7F98
+  11D5: MOV       A,#0x89
+  11D7: MOVX      @DPTR,A
+  11D8: MOV       DPTR,#0x7F99
+  11DB: MOVX      A,@DPTR
+  11DC: MOV       [0],A  ; direct 0x18
+  11DE: MOV       DPTR,#0x7F98
+  11E1: MOV       A,#0x8B
+  11E3: MOVX      @DPTR,A
+  11E4: MOV       A,#0x89
+  11E6: MOVX      @DPTR,A
+  11E7: MOV       DPTR,#0x7F99
+  11EA: MOVX      A,@DPTR
+  11EB: MOV       [0],A  ; direct 0x19
+  11ED: MOV       DPTR,#0x7F98
+  11F0: MOV       A,#0x9F
+  11F2: MOVX      @DPTR,A
+  11F3: LJMP      0x1156
+  11F6: RET
+  11F7: PUSH      [0xE0]
+  11F9: PUSH      [0xF0]
+  11FB: PUSH      [0x83]
+  11FD: PUSH      [0x82]
+  11FF: PUSH      [0x85]
+  1201: PUSH      [0x84]
+  1203: PUSH      [0x86]
+  1205: MOV       [r86],#0x00
+  1208: PUSH      [0xD0]
+  120A: MOV       [rD0],#0x00
+  120D: PUSH      [0x00]
+  120F: PUSH      [0x01]
+  1211: PUSH      [0x02]
+  1213: PUSH      [0x03]
+  1215: PUSH      [0x04]
+  1217: PUSH      [0x05]
+  1219: PUSH      [0x06]
+  121B: PUSH      [0x07]
+  121D: MOV       A,[r0A]  ; direct 0x0A
+  121F: ADD       A,#0xFD
+  1221: JZ        0x122C
+  1223: ADD       A,#0x02
+  1225: JNZ       0x1270
+  1227: LCALL     0x172D
+  122A: SJMP      0x1270
+  122C: MOV       [r15],#0x00
+  122F: MOV       DPTR,#0x7F96
+  1232: MOV       A,[r11]  ; direct 0x11
+  1234: MOVX      @DPTR,A
+  1235: MOV       DPTR,#0x7F97
+  1238: MOV       A,[r10]  ; direct 0x10
+  123A: MOVX      @DPTR,A
+  123B: MOV       DPTR,#0x7F98
+  123E: MOV       A,#0xB7
+  1240: MOVX      @DPTR,A
+  1241: MOV       A,#0xB5
+  1243: MOVX      @DPTR,A
+  1244: MOV       DPTR,#0xFFFF
+  1247: MOVX      A,@DPTR
+  1248: [FF 74 00] ???
+  1249: MOV       A,#0x00
+  124B: ADD       A,[r15]
+  124D: MOV       [0],A  ; direct 0x82
+  124F: CLR       A
+  1250: [34 7E F5] ???
+  1251: [7E F5 83] ???
+  1252: MOV       [0],A  ; direct 0x83
+  1254: MOV       A,R7
+  1255: MOVX      @DPTR,A
+  1256: MOV       DPTR,#0x7F98
+  1259: MOV       A,#0xBF
+  125B: MOVX      @DPTR,A
+  125C: MOV       A,[r11]  ; direct 0x11
+  125E: [D3 94 FE] ???
+  125F: [94 FE 40] ???
+  1260: [FE 40 02] ???
+  1261: [40 02 05] ???
+  1262: LJMP      0x0510
+  1265: [05 11 05] ???
+  1266: [11 05 15] ???
+  1267: [05 15 E5] ???
+  1268: [15 E5 15] ???
+  1269: MOV       A,[r15]  ; direct 0x15
+  126B: CJNE      A,#0x40, 0x122F
+  126E: SJMP      0x1270
+  1270: [53 91 EF] ???
+  1271: [91 EF 90] ???
+  1272: MOV       A,R7
+  1273: MOV       DPTR,#0x7FA9
+  1276: MOV       A,#0x04
+  1278: MOVX      @DPTR,A
+  1279: MOV       DPTR,#0x7FB9
+  127C: MOV       A,#0x40
+  127E: MOVX      @DPTR,A
+  127F: POP       [0x07]
+  1281: POP       [0x06]
+  1283: POP       [0x05]
+  1285: POP       [0x04]
+  1287: POP       [0x03]
+  1289: POP       [0x02]
+  128B: POP       [0x01]
+  128D: POP       [0x00]
+  128F: POP       [0xD0]
+  1291: POP       [0x86]
+  1293: POP       [0x84]
+  1295: POP       [0x85]
+  1297: POP       [0x82]
+  1299: POP       [0x83]
+  129B: POP       [0xF0]
+  129D: POP       [0xE0]
+  129F: [32 78 08] ???
+  12A0: [78 08 79] ???
+  12A1: [08 79 00] ???
+  12A2: [79 00 90] ???
+  12A3: [00 90 7F] ???
+  12A4: MOV       DPTR,#0x7F96
+  12A7: MOV       A,#0x40
+  12A9: MOVX      @DPTR,A
+  12AA: MOV       DPTR,#0x7F97
+  12AD: CLR       A
+  12AE: MOVX      @DPTR,A
+  12AF: MOV       DPTR,#0x7F98
+  12B2: MOV       A,#0x9A
+  12B4: MOVX      @DPTR,A
+  12B5: INC       A
+  12B6: MOVX      @DPTR,A
+  12B7: DEC       A
+  12B8: MOVX      @DPTR,A
+  12B9: INC       A
+  12BA: MOVX      @DPTR,A
+  12BB: DEC       A
+  12BC: MOVX      @DPTR,A
+  12BD: INC       A
+  12BE: MOVX      @DPTR,A
+  12BF: DEC       A
+  12C0: MOVX      @DPTR,A
+  12C1: INC       A
+  12C2: MOVX      @DPTR,A
+  12C3: MOV       A,#0x9F
+  12C5: MOVX      @DPTR,A
+  12C6: MOV       DPTR,#0x7F96
+  12C9: MOV       A,R5
+  12CA: MOVX      @DPTR,A
+  12CB: MOV       DPTR,#0x7F97
+  12CE: MOV       A,R7
+  12CF: MOVX      @DPTR,A
+  12D0: MOV       DPTR,#0x7F98
+  12D3: MOV       A,#0x9B
+  12D5: MOVX      @DPTR,A
+  12D6: [7A 04 90] ???
+  12D7: INC       A
+  12D8: MOV       DPTR,#0x7DC0
+
+=== 0x11F6 ===
+  11F6: RET
+  11F7: PUSH      [0xE0]
+  11F9: PUSH      [0xF0]
+  11FB: PUSH      [0x83]
+  11FD: PUSH      [0x82]
+  11FF: PUSH      [0x85]
+  1201: PUSH      [0x84]
+  1203: PUSH      [0x86]
+  1205: MOV       [r86],#0x00
+  1208: PUSH      [0xD0]
+  120A: MOV       [rD0],#0x00
+  120D: PUSH      [0x00]
+  120F: PUSH      [0x01]
+  1211: PUSH      [0x02]
+  1213: PUSH      [0x03]
+  1215: PUSH      [0x04]
+  1217: PUSH      [0x05]
+  1219: PUSH      [0x06]
+  121B: PUSH      [0x07]
+  121D: MOV       A,[r0A]  ; direct 0x0A
+  121F: ADD       A,#0xFD
+  1221: JZ        0x122C
+  1223: ADD       A,#0x02
+  1225: JNZ       0x1270
+  1227: LCALL     0x172D
+  122A: SJMP      0x1270
+  122C: MOV       [r15],#0x00
+  122F: MOV       DPTR,#0x7F96
+  1232: MOV       A,[r11]  ; direct 0x11
+  1234: MOVX      @DPTR,A
+  1235: MOV       DPTR,#0x7F97
+  1238: MOV       A,[r10]  ; direct 0x10
+  123A: MOVX      @DPTR,A
+  123B: MOV       DPTR,#0x7F98
+  123E: MOV       A,#0xB7
+  1240: MOVX      @DPTR,A
+  1241: MOV       A,#0xB5
+  1243: MOVX      @DPTR,A
+  1244: MOV       DPTR,#0xFFFF
+  1247: MOVX      A,@DPTR
+  1248: [FF 74 00] ???
+  1249: MOV       A,#0x00
+  124B: ADD       A,[r15]
+  124D: MOV       [0],A  ; direct 0x82
+  124F: CLR       A
+  1250: [34 7E F5] ???
+  1251: [7E F5 83] ???
+  1252: MOV       [0],A  ; direct 0x83
+  1254: MOV       A,R7
+  1255: MOVX      @DPTR,A
+  1256: MOV       DPTR,#0x7F98
+  1259: MOV       A,#0xBF
+  125B: MOVX      @DPTR,A
+  125C: MOV       A,[r11]  ; direct 0x11
+  125E: [D3 94 FE] ???
+  125F: [94 FE 40] ???
+  1260: [FE 40 02] ???
+  1261: [40 02 05] ???
+  1262: LJMP      0x0510
+  1265: [05 11 05] ???
+  1266: [11 05 15] ???
+  1267: [05 15 E5] ???
+  1268: [15 E5 15] ???
+  1269: MOV       A,[r15]  ; direct 0x15
+  126B: CJNE      A,#0x40, 0x122F
+  126E: SJMP      0x1270
+  1270: [53 91 EF] ???
+  1271: [91 EF 90] ???
+  1272: MOV       A,R7
+  1273: MOV       DPTR,#0x7FA9
+  1276: MOV       A,#0x04
+  1278: MOVX      @DPTR,A
+  1279: MOV       DPTR,#0x7FB9
+  127C: MOV       A,#0x40
+  127E: MOVX      @DPTR,A
+  127F: POP       [0x07]
+  1281: POP       [0x06]
+  1283: POP       [0x05]
+  1285: POP       [0x04]
+  1287: POP       [0x03]
+  1289: POP       [0x02]
+  128B: POP       [0x01]
+  128D: POP       [0x00]
+  128F: POP       [0xD0]
+  1291: POP       [0x86]
+  1293: POP       [0x84]
+  1295: POP       [0x85]
+  1297: POP       [0x82]
+  1299: POP       [0x83]
+  129B: POP       [0xF0]
+  129D: POP       [0xE0]
+  129F: [32 78 08] ???
+  12A0: [78 08 79] ???
+  12A1: [08 79 00] ???
+  12A2: [79 00 90] ???
+  12A3: [00 90 7F] ???
+  12A4: MOV       DPTR,#0x7F96
+  12A7: MOV       A,#0x40
+  12A9: MOVX      @DPTR,A
+  12AA: MOV       DPTR,#0x7F97
+  12AD: CLR       A
+  12AE: MOVX      @DPTR,A
+  12AF: MOV       DPTR,#0x7F98
+  12B2: MOV       A,#0x9A
+  12B4: MOVX      @DPTR,A
+  12B5: INC       A
+  12B6: MOVX      @DPTR,A
+  12B7: DEC       A
+  12B8: MOVX      @DPTR,A
+  12B9: INC       A
+  12BA: MOVX      @DPTR,A
+  12BB: DEC       A
+  12BC: MOVX      @DPTR,A
+  12BD: INC       A
