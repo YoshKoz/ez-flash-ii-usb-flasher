@@ -60,10 +60,7 @@ enum Commands {
         no_cpu: bool,
     },
     /// Exact init sequence (loader tables)
-    InitExact {
-        table1: PathBuf,
-        table2: PathBuf,
-    },
+    InitExact { table1: PathBuf, table2: PathBuf },
     /// Read cartridge header and display game info
     CartInfo,
     /// Read save data from cartridge
@@ -142,14 +139,9 @@ enum Commands {
         value: u16,
     },
     /// Read internal RAM via vendor request
-    RamRead {
-        address: u16,
-    },
+    RamRead { address: u16 },
     /// Write to internal RAM via vendor request
-    RamWrite {
-        address: u16,
-        value: u8,
-    },
+    RamWrite { address: u16, value: u8 },
     /// Passive read: try reading all IN endpoints without sending anything
     PassiveRead,
     /// Reset cartridge NOR flash to read array mode
@@ -246,13 +238,13 @@ fn print_device_info(desc: &DeviceDescriptor, handle: &DeviceHandle<GlobalContex
         desc.product_id()
     );
     // Read string descriptors
-    if let Ok(s) = handle.read_manufacturer_string_ascii(&desc) {
+    if let Ok(s) = handle.read_manufacturer_string_ascii(desc) {
         println!("  Manufacturer: {s}");
     }
-    if let Ok(s) = handle.read_product_string_ascii(&desc) {
+    if let Ok(s) = handle.read_product_string_ascii(desc) {
         println!("  Product: {s}");
     }
-    if let Ok(s) = handle.read_serial_number_string_ascii(&desc) {
+    if let Ok(s) = handle.read_serial_number_string_ascii(desc) {
         println!("  Serial: {s}");
     }
     println!("  Device class: {:#04x}", desc.class_code());
@@ -261,7 +253,7 @@ fn print_device_info(desc: &DeviceDescriptor, handle: &DeviceHandle<GlobalContex
     println!("  Max EP0 size: {}", desc.max_packet_size());
     println!("  Num configs: {}", desc.num_configurations());
     // Active config
-    if let Ok(config) = device_config_descriptor(&handle, 0) {
+    if let Ok(config) = device_config_descriptor(handle, 0) {
         for iface in config.interfaces() {
             for iface_desc in iface.descriptors() {
                 println!(
@@ -326,10 +318,7 @@ fn ezusb_read_ram(handle: &DeviceHandle<GlobalContext>, addr: u32) -> Result<u8>
         .read_control(
             0xC0, // Device-to-Host, Vendor, Device
             0xA3, // Cypress Upload from internal memory
-            wval,
-            windex,
-            &mut buf,
-            TIMEOUT,
+            wval, windex, &mut buf, TIMEOUT,
         )
         .with_context(|| format!("vendor 0xA3 read from addr 0x{addr:04X}"))?;
     Ok(buf[0])
@@ -347,14 +336,7 @@ fn download_firmware(handle: &DeviceHandle<GlobalContext>, fw: &[u8], no_cpu: bo
         let addr = i * chunk_size;
         let wval = (addr & 0xFFFF) as u16;
         let windex = ((addr >> 16) & 0xFFFF) as u16;
-        handle.write_control(
-            0x40,
-            VR_CYPRESS_WRITE,
-            wval,
-            windex,
-            chunk,
-            TIMEOUT,
-        )?;
+        handle.write_control(0x40, VR_CYPRESS_WRITE, wval, windex, chunk, TIMEOUT)?;
         if i % 16 == 0 {
             print!("\r  Uploading... {}/{} bytes", (i + 1) * chunk_size, total);
             use std::io::Write;
@@ -397,7 +379,8 @@ fn parse_chunk_table(data: &[u8]) -> Result<Vec<(u16, Vec<u8>)>> {
 }
 
 fn load_chunk_table(path: &PathBuf) -> Result<Vec<(u16, Vec<u8>)>> {
-    let data = fs::read(path).with_context(|| format!("reading chunk table: {}", path.display()))?;
+    let data =
+        fs::read(path).with_context(|| format!("reading chunk table: {}", path.display()))?;
     parse_chunk_table(&data)
 }
 
@@ -573,9 +556,7 @@ fn cmd_probe(request: u8, value: u16) -> Result<()> {
     );
 
     let mut buf = [0u8; 64];
-    match handle.read_control(
-        0xC0, request, value, 0, &mut buf, TIMEOUT,
-    ) {
+    match handle.read_control(0xC0, request, value, 0, &mut buf, TIMEOUT) {
         Ok(len) => {
             println!("  Response: {} bytes", len);
             print_hex(&buf[..len]);
@@ -615,11 +596,7 @@ fn cmd_ram_read(address: u16) -> Result<()> {
 
     let mut buf = [0u8; 64];
     println!("Reading RAM at 0x{address:04X} via vendor 0xA3...");
-    match handle.read_control(
-        0xC0,
-        0xA3,
-        address, 0, &mut buf, TIMEOUT,
-    ) {
+    match handle.read_control(0xC0, 0xA3, address, 0, &mut buf, TIMEOUT) {
         Ok(len) => {
             println!("  Read {len} bytes:");
             print_hex(&buf[..len]);
@@ -658,11 +635,7 @@ fn cmd_ram_write(address: u16, value: u8) -> Result<()> {
 
     let data = [value];
     println!("Writing 0x{value:02X} to RAM at 0x{address:04X} via vendor 0xA0...");
-    match handle.write_control(
-        0x40,
-        0xA0,
-        address, 0, &data, TIMEOUT,
-    ) {
+    match handle.write_control(0x40, 0xA0, address, 0, &data, TIMEOUT) {
         Ok(_) => {
             println!("  Write OK. Verifying with read...");
             let mut buf = [0u8; 64];
@@ -778,7 +751,11 @@ fn save_read_via_rom_read(
         match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
             Ok(len) => {
                 all.extend_from_slice(&buf[..len]);
-                let h: String = buf[..8].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                let h: String = buf[..8]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 println!("  [{chunk:02}] 0x{:06X}: {}...", save_addr, h);
             }
             Err(e) => {
@@ -830,7 +807,7 @@ fn save_read_via_reg(
         (0x000000u32, 0x15FFu16),
         (0x010000u32, 0xD2FFu16),
         (0x020000u32, 0x15FFu16),
-        (0xE00000u32, 0x0000u16),  // RAM page = 0
+        (0xE00000u32, 0x0000u16), // RAM page = 0
         (0xFE0000u32, 0x15FFu16),
     ] {
         let cmd = [
@@ -871,7 +848,11 @@ fn save_read_via_reg(
         match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
             Ok(len) => {
                 all.extend_from_slice(&buf[..len]);
-                let h: String = buf[..8].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                let h: String = buf[..8]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 println!("  [{chunk:02}] 0x{:06X}: {}...", addr, h);
             }
             Err(e) => {
@@ -916,7 +897,11 @@ fn save_read_byte_addr(
         let mut buf = [0u8; 64];
         match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
             Ok(len) => {
-                let h: String = buf[..len.min(8)].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                let h: String = buf[..len.min(8)]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 eprintln!("  [{chunk:03}] 0x{addr:06X}: {h}... ({len}B)");
                 all.extend_from_slice(&buf[..len]);
             }
@@ -929,6 +914,7 @@ fn save_read_byte_addr(
     Ok(all)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_save_read(
     byte_addr: u32,
     count: u32,
@@ -974,7 +960,9 @@ fn cmd_save_read(
 
     if use_rom_read {
         println!("Method: rom_read (0x01) at offset 0x{rom_offset:X}");
-        let data = save_read_via_rom_read(&handle, data_ep, cmd_ep, byte_addr, count, rom_offset, suffix)?;
+        let data = save_read_via_rom_read(
+            &handle, data_ep, cmd_ep, byte_addr, count, rom_offset, suffix,
+        )?;
         if let Some(path) = output {
             fs::write(&path, &data)?;
             println!("Wrote {} bytes to {}", data.len(), path.display());
@@ -995,8 +983,15 @@ fn cmd_save_read(
     }
 
     // --word-addr kept as flag for backward compat; both paths now use byte addressing
-    let method = if use_word_addr { "byte_addr (corrected)" } else { "byte_addr" };
-    println!("Method: {method} (0x14+0x02) type='{}' (0x{:02X})", save_type, suffix);
+    let method = if use_word_addr {
+        "byte_addr (corrected)"
+    } else {
+        "byte_addr"
+    };
+    println!(
+        "Method: {method} (0x14+0x02) type='{}' (0x{:02X})",
+        save_type, suffix
+    );
     let data = save_read_byte_addr(&handle, cmd_ep, data_ep, byte_addr, count, suffix)?;
     if let Some(path) = output {
         fs::write(&path, &data)?;
@@ -1024,14 +1019,23 @@ fn read_flash128_native(
     const BYTES_PER_BANK: u32 = 65536;
 
     let fwrite = |addr: u16, data: u8| -> Result<()> {
-        handle.write_bulk(cmd_ep, &[0x20u8, (addr & 0xFF) as u8, (addr >> 8) as u8, data], TIMEOUT)?;
+        handle.write_bulk(
+            cmd_ep,
+            &[0x20u8, (addr & 0xFF) as u8, (addr >> 8) as u8, data],
+            TIMEOUT,
+        )?;
         std::thread::sleep(Duration::from_millis(4));
         Ok(())
     };
     let drain = || {
         let mut buf = [0u8; 64];
         for _ in 0..64 {
-            if handle.read_bulk(data_ep, &mut buf, Duration::from_millis(40)).is_err() { break; }
+            if handle
+                .read_bulk(data_ep, &mut buf, Duration::from_millis(40))
+                .is_err()
+            {
+                break;
+            }
         }
     };
     let bank_switch = |bank: u8| -> Result<()> {
@@ -1054,7 +1058,17 @@ fn read_flash128_native(
         while off < BYTES_PER_BANK {
             drain();
             handle
-                .write_bulk(cmd_ep, &[0x03u8, (off & 0xFF) as u8, ((off >> 8) & 0xFF) as u8, 0x00, 0x00], TIMEOUT)
+                .write_bulk(
+                    cmd_ep,
+                    &[
+                        0x03u8,
+                        (off & 0xFF) as u8,
+                        ((off >> 8) & 0xFF) as u8,
+                        0x00,
+                        0x00,
+                    ],
+                    TIMEOUT,
+                )
                 .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
             std::thread::sleep(Duration::from_millis(8));
             let mut buf = [0u8; 64];
@@ -1124,13 +1138,24 @@ fn cmd_save_probe(count: u32) -> Result<()> {
     std::thread::sleep(Duration::from_millis(50));
     for sub_addr in [0u32, 64, 128, 256, 512, 1024, 0x10000, 0x100000] {
         let addr = sub_addr;
-        let cmd = [0x02u8, (addr & 0xFF) as u8, ((addr >> 8) & 0xFF) as u8, ((addr >> 16) & 0xFF) as u8, b'f', 0];
+        let cmd = [
+            0x02u8,
+            (addr & 0xFF) as u8,
+            ((addr >> 8) & 0xFF) as u8,
+            ((addr >> 16) & 0xFF) as u8,
+            b'f',
+            0,
+        ];
         handle.write_bulk(cmd_ep, &cmd[..5], TIMEOUT)?;
         std::thread::sleep(Duration::from_millis(100));
         let mut buf = [0u8; 64];
         match handle.read_bulk(data_ep, &mut buf, Duration::from_millis(500)) {
             Ok(len) => {
-                let h: String = buf[..8].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                let h: String = buf[..8]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 println!("  addr=0x{addr:06X}: {}... ({} bytes)", h, len);
             }
             Err(e) => println!("  addr=0x{addr:06X}: error: {e}"),
@@ -1149,14 +1174,25 @@ fn cmd_save_probe(count: u32) -> Result<()> {
     let mut all = Vec::new();
     for chunk in 0..count {
         let addr = chunk * 64;
-        let cmd = [0x02u8, (addr & 0xFF) as u8, ((addr >> 8) & 0xFF) as u8, ((addr >> 16) & 0xFF) as u8, b'f', 0];
+        let cmd = [
+            0x02u8,
+            (addr & 0xFF) as u8,
+            ((addr >> 8) & 0xFF) as u8,
+            ((addr >> 16) & 0xFF) as u8,
+            b'f',
+            0,
+        ];
         handle.write_bulk(cmd_ep, &cmd[..5], TIMEOUT)?;
         std::thread::sleep(Duration::from_millis(100));
         let mut buf = [0u8; 64];
         match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
             Ok(len) => {
                 all.extend_from_slice(&buf[..len]);
-                let h: String = buf[..8].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                let h: String = buf[..8]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 println!("  [{chunk:02}] 0x{:06X}: {}...", addr, h);
             }
             Err(e) => println!("  [{chunk:02}] {e}"),
@@ -1182,8 +1218,16 @@ fn cmd_save_probe(count: u32) -> Result<()> {
     let mut buf1 = [0u8; 64];
     handle.read_bulk(data_ep, &mut buf1, TIMEOUT)?;
 
-    let h0: String = buf0[..8].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-    let h1: String = buf1[..8].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let h0: String = buf0[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let h1: String = buf1[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     println!("  addr=0x000000: {}...", h0);
     println!("  addr=0xFFFFFF: {}...", h1);
     if buf0[..8] == buf1[..8] {
@@ -1194,14 +1238,35 @@ fn cmd_save_probe(count: u32) -> Result<()> {
 
     // Test 9: Try 0x1A register reads from the cartridge address space
     println!("\n=== Test 9: Register reads via 0x1A ===");
-    for reg_addr in [0x000000u32, 0x800000, 0x9C0000, 0xE00000, 0x9FE000, 0xFF0000, 0x0E0000] {
-        let cmd = [0x1Au8, (reg_addr & 0xFF) as u8, ((reg_addr >> 8) & 0xFF) as u8, ((reg_addr >> 16) & 0xFF) as u8];
+    for reg_addr in [
+        0x000000u32,
+        0x800000,
+        0x9C0000,
+        0xE00000,
+        0x9FE000,
+        0xFF0000,
+        0x0E0000,
+    ] {
+        let cmd = [
+            0x1Au8,
+            (reg_addr & 0xFF) as u8,
+            ((reg_addr >> 8) & 0xFF) as u8,
+            ((reg_addr >> 16) & 0xFF) as u8,
+        ];
         handle.write_bulk(cmd_ep, &cmd, TIMEOUT)?;
         std::thread::sleep(Duration::from_millis(20));
         let mut buf = [0u8; 64];
         match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
             Ok(len) => {
-                println!("  reg=0x{reg_addr:06X}: {} bytes: {}", len, buf[..len.min(8)].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "));
+                println!(
+                    "  reg=0x{reg_addr:06X}: {} bytes: {}",
+                    len,
+                    buf[..len.min(8)]
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
             }
             Err(e) => println!("  reg=0x{reg_addr:06X}: {e}"),
         }
@@ -1252,9 +1317,7 @@ fn send_unlock(handle: &DeviceHandle<GlobalContext>, cmd_ep: u8) -> Result<()> {
         (0x802000u32, 0xD200u16),
         (0x804000u32, 0x1500u16),
     ];
-    let _lock_writes = vec![
-        (0x9FC000u32, 0x1500u16),
-    ];
+    let _lock_writes = [(0x9FC000u32, 0x1500u16)];
 
     println!("    Sending unlock sequence...");
     for (addr, val) in &unlock_writes {
@@ -1365,7 +1428,6 @@ fn cmd_cart_read(
                 println!("  [{chunk:02}] read error: {e}");
                 break;
             }
-
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -1513,7 +1575,8 @@ fn cmd_dump(
                 bank,
             ];
 
-            handle.write_bulk(cmd_ep, &cmd, TIMEOUT)
+            handle
+                .write_bulk(cmd_ep, &cmd, TIMEOUT)
                 .with_context(|| format!("EP4 ROM write at byte_addr=0x{byte_addr:06X}"))?;
 
             std::thread::sleep(Duration::from_millis(5));
@@ -1765,7 +1828,11 @@ fn cmd_bulk_test() -> Result<()> {
         let mut buf = [0u8; 64];
         match handle.read_bulk(ep, &mut buf, Duration::from_millis(200)) {
             Ok(len) => {
-                let h: String = buf[..8].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                let h: String = buf[..8]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 println!("  EP 0x{ep:02X} IN: {len} bytes, first 8: {h}...");
             }
             Err(rusb::Error::Timeout) => println!("  EP 0x{ep:02X} IN: timeout"),
@@ -1826,10 +1893,17 @@ fn cmd_read_reg(addr: u32) -> Result<()> {
     let mut buf = [0u8; 64];
     match handle.read_bulk(data_ep, &mut buf, TIMEOUT) {
         Ok(len) => {
-            let hex = buf[..len.min(8)].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+            let hex = buf[..len.min(8)]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
             println!("  Response ({} bytes): {}", len, hex);
             if len >= 2 {
-                println!("  Word value: 0x{:04X}", u16::from_le_bytes([buf[0], buf[1]]));
+                println!(
+                    "  Word value: 0x{:04X}",
+                    u16::from_le_bytes([buf[0], buf[1]])
+                );
             }
         }
         Err(e) => println!("  Error: {e}"),
@@ -1881,7 +1955,10 @@ Write-Output "Power cycled OK"
         .args(["-Command", script])
         .output()?;
     if !out.status.success() {
-        bail!("PowerShell power cycle failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "PowerShell power cycle failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     println!("{}", String::from_utf8_lossy(&out.stdout).trim());
     Ok(())
@@ -1901,10 +1978,17 @@ fn power_cycle_linux(device: &rusb::Device<GlobalContext>) -> Result<()> {
     let auth = format!("{sysfs_path}/authorized");
     println!("  sysfs path: {auth}");
     let out = std::process::Command::new("pkexec")
-        .args(["sh", "-c", &format!("echo 0 > {auth} && sleep 0.5 && echo 1 > {auth}")])
+        .args([
+            "sh",
+            "-c",
+            &format!("echo 0 > {auth} && sleep 0.5 && echo 1 > {auth}"),
+        ])
         .output()?;
     if !out.status.success() {
-        bail!("sysfs power cycle failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "sysfs power cycle failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -1921,8 +2005,12 @@ fn cmd_reload() -> Result<()> {
         let _ = handle.detach_kernel_driver(0);
         // AN2131 CPUCS=0x7F92, bit0 8051RES: 1=hold in reset
         let _ = handle.write_control(
-            0x40, VR_CYPRESS_WRITE, CPUCS_ADDR, 0,
-            &[0x01], Duration::from_millis(500),
+            0x40,
+            VR_CYPRESS_WRITE,
+            CPUCS_ADDR,
+            0,
+            &[0x01],
+            Duration::from_millis(500),
         );
         drop(handle);
         std::thread::sleep(Duration::from_millis(1500));
@@ -1988,8 +2076,12 @@ fn main() -> Result<()> {
             let found_active = find_device(EZWRITER_VID, EZWRITER_PID);
 
             match (found_boot, found_active) {
-                (Ok(_), _) => println!("Bootloader mode:   EZ-Writer detected (VID 0x{BOOTLOADER_VID:04x}:PID 0x{BOOTLOADER_PID:04x})"),
-                (_, Ok(_)) => println!("Active mode:       EZ-Writer detected (VID 0x{EZWRITER_VID:04x}:PID 0x{EZWRITER_PID:04x})"),
+                (Ok(_), _) => println!(
+                    "Bootloader mode:   EZ-Writer detected (VID 0x{BOOTLOADER_VID:04x}:PID 0x{BOOTLOADER_PID:04x})"
+                ),
+                (_, Ok(_)) => println!(
+                    "Active mode:       EZ-Writer detected (VID 0x{EZWRITER_VID:04x}:PID 0x{EZWRITER_PID:04x})"
+                ),
                 _ => println!("No EZ-Writer device found."),
             }
         }
@@ -2005,7 +2097,8 @@ fn main() -> Result<()> {
             let handle = device.open()?;
             let _ = handle.detach_kernel_driver(0);
             println!("Found EZ-Writer in bootloader mode.");
-            let fw_data = fs::read(&fw).with_context(|| format!("reading firmware: {}", fw.display()))?;
+            let fw_data =
+                fs::read(&fw).with_context(|| format!("reading firmware: {}", fw.display()))?;
             download_firmware(&handle, &fw_data, no_cpu)?;
         }
         Commands::InitExact { table1, table2 } => cmd_init_exact(&table1, &table2)?,
@@ -2019,7 +2112,16 @@ fn main() -> Result<()> {
             use_reg,
             use_rom_read,
             rom_offset,
-        } => cmd_save_read(addr, count, save_type, output, word_addr, use_reg, use_rom_read, rom_offset)?,
+        } => cmd_save_read(
+            addr,
+            count,
+            save_type,
+            output,
+            word_addr,
+            use_reg,
+            use_rom_read,
+            rom_offset,
+        )?,
         Commands::SaveProbe { count } => cmd_save_probe(count)?,
         Commands::CartRead {
             addr,

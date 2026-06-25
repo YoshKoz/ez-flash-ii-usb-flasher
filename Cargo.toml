@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "src/ezwriter-cli",
+    "src/ezwriter-gui",
+]
+resolver = "2"
