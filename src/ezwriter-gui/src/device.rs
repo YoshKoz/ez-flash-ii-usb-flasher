@@ -14,6 +14,59 @@ pub const DATA_EP: u8 = 0x82;
 pub const ROM_READ_DELAY_MS: u64 = 5;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Resolve a bundled data file (firmware loader tables, etc.) without depending
+/// on the process working directory. Checks the current dir first, then the
+/// directory containing the executable. Falls back to the bare name so callers
+/// still surface a meaningful "not found" path in their error.
+pub fn resolve_asset(name: &str) -> PathBuf {
+    let cwd = PathBuf::from(name);
+    if cwd.exists() {
+        return cwd;
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let beside = dir.join(name);
+        if beside.exists() {
+            return beside;
+        }
+    }
+    cwd
+}
+
+/// Canonical save-size lookup — the single source of truth shared by the GUI.
+/// Matches the exact catalogue strings the game DB emits first, then falls back
+/// to a tolerant substring parse so unrecognised header text still yields a sane
+/// size rather than a wrong one.
+pub fn save_size_bytes(save_type: &str) -> usize {
+    match save_type.trim() {
+        "FLASH 128K" => return 128 * 1024,
+        "FLASH 256K" => return 256 * 1024,
+        "FLASH 64K" => return 64 * 1024,
+        "SRAM 256K" => return 256 * 1024,
+        "SRAM 64K" => return 64 * 1024,
+        "SRAM 32K" => return 32 * 1024,
+        "EEPROM 8K" => return 8 * 1024,
+        "EEPROM 512" => return 512,
+        _ => {}
+    }
+    // Fallback for header text that doesn't match the catalogue exactly.
+    let t = save_type.to_ascii_uppercase();
+    if t.contains("256K") {
+        256 * 1024
+    } else if t.contains("128K") {
+        128 * 1024
+    } else if t.contains("64K") {
+        64 * 1024
+    } else if t.contains("8K") {
+        8 * 1024
+    } else if t.contains("512") {
+        512
+    } else {
+        32 * 1024
+    }
+}
+
 pub struct GameDBEntry {
     pub code: &'static str,
     pub title: &'static str,
