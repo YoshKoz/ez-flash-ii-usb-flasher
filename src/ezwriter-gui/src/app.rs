@@ -35,24 +35,6 @@ fn decode_nintendo_logo(data: &[u8]) -> Vec<[u8; 3]> {
     pixels
 }
 
-fn save_size_bytes(save_type: &str) -> usize {
-    if save_type.contains("128K") || save_type.contains("256K") {
-        if save_type.contains("256K") {
-            256 * 1024
-        } else {
-            128 * 1024
-        }
-    } else if save_type.contains("64K") {
-        64 * 1024
-    } else if save_type.contains("8K") || save_type.contains("8k") {
-        8 * 1024
-    } else if save_type.contains("512") {
-        512
-    } else {
-        32 * 1024
-    }
-}
-
 enum AppTab {
     Status,
     CartInfo,
@@ -66,6 +48,7 @@ enum BgCmd {
     Header(Box<Option<device::CartHeader>>),
     Progress(String),
     DumpProgress { bytes_read: u64, total_bytes: u64 },
+    SaveReadProgress { bytes_read: u64, total_bytes: u64 },
     SaveWriteProgress { bytes_read: u64, total_bytes: u64 },
     Error(String),
 }
@@ -127,6 +110,19 @@ impl eframe::App for EzWriterApp {
                         bytes_read as f64 / 1_048_576.0,
                         total_bytes as f64 / 1_048_576.0,
                         pct * 100.0
+                    );
+                }
+                BgCmd::SaveReadProgress {
+                    bytes_read,
+                    total_bytes,
+                } => {
+                    let pct = bytes_read as f64 / total_bytes as f64;
+                    self.progress_value = pct as f32;
+                    self.progress = format!(
+                        "Dumping save: {:.0}% ({:.1} / {:.1} KB)",
+                        pct * 100.0,
+                        bytes_read as f64 / 1024.0,
+                        total_bytes as f64 / 1024.0
                     );
                 }
                 BgCmd::SaveWriteProgress {
@@ -222,6 +218,27 @@ impl EzWriterApp {
         });
     }
 
+    /// Locate the firmware loader tables without depending on the working
+    /// directory. Checks next to the executable and in the CWD; if missing,
+    /// prompts the user to pick `loader_table1.bin` and derives its sibling
+    /// `loader_table2.bin` from the same folder. Returns `None` if both files
+    /// can't be found and the user cancels the dialog.
+    fn locate_loaders() -> Option<(PathBuf, PathBuf)> {
+        let t1 = device::resolve_asset("loader_table1.bin");
+        let t2 = device::resolve_asset("loader_table2.bin");
+        if t1.exists() && t2.exists() {
+            return Some((t1, t2));
+        }
+        let picked = FileDialog::new()
+            .set_title("Locate loader_table1.bin")
+            .add_filter("Loader table", &["bin"])
+            .pick_file()?;
+        let dir = picked.parent().map(PathBuf::from).unwrap_or_default();
+        let t1 = dir.join("loader_table1.bin");
+        let t2 = dir.join("loader_table2.bin");
+        (t1.exists() && t2.exists()).then_some((t1, t2))
+    }
+
     fn show_status(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Device Status");
         ui.separator();
@@ -234,31 +251,37 @@ impl EzWriterApp {
         ui.heading("Initialize (load firmware)");
         ui.label("Plug in device in bootloader mode, then click below:");
         if ui.button("[!] Initialize AN2131 (load firmware)").clicked() {
-            let tx = self.tx.clone();
-            let t1 = PathBuf::from("loader_table1.bin");
-            let t2 = PathBuf::from("loader_table2.bin");
-            self.progress_value = 0.01;
-            thread::spawn(move || match device::init_exact(&t1, &t2) {
-                Ok(msg) => {
-                    let _ = tx.send(BgCmd::Status(msg));
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    match device::detect_mode() {
-                        device::DeviceMode::Active => {
-                            let _ = tx.send(BgCmd::Status("Active! Device ready.".into()));
-                            if let Ok(hdr) = device::read_cart_header() {
-                                let _ = tx.send(BgCmd::Header(Box::new(Some(hdr))));
+            if let Some((t1, t2)) = Self::locate_loaders() {
+                let tx = self.tx.clone();
+                self.progress_value = 0.01;
+                thread::spawn(move || match device::init_exact(&t1, &t2) {
+                    Ok(msg) => {
+                        let _ = tx.send(BgCmd::Status(msg));
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        match device::detect_mode() {
+                            device::DeviceMode::Active => {
+                                let _ = tx.send(BgCmd::Status("Active! Device ready.".into()));
+                                if let Ok(hdr) = device::read_cart_header() {
+                                    let _ = tx.send(BgCmd::Header(Box::new(Some(hdr))));
+                                }
                             }
+                            device::DeviceMode::Bootloader => {
+                                let _ =
+                                    tx.send(BgCmd::Status("Still in bootloader. Re-init?".into()));
+                            }
+                            _ => {}
                         }
-                        device::DeviceMode::Bootloader => {
-                            let _ = tx.send(BgCmd::Status("Still in bootloader. Re-init?".into()));
-                        }
-                        _ => {}
                     }
-                }
-                Err(e) => {
-                    let _ = tx.send(BgCmd::Error(e.to_string()));
-                }
-            });
+                    Err(e) => {
+                        let _ = tx.send(BgCmd::Error(e.to_string()));
+                    }
+                });
+            } else {
+                self.progress = "Firmware loader tables not found. Place \
+                    loader_table1.bin and loader_table2.bin next to the executable \
+                    (or in the working directory), then try again."
+                    .into();
+            }
         }
         if ui.button("[R] Reset Cartridge Flash").clicked() {
             let tx = self.tx.clone();
@@ -319,7 +342,7 @@ impl EzWriterApp {
                     }
                     ui.label(format!("Maker: {}", hdr.maker));
                     ui.label(format!("Save type: {}", hdr.save_type));
-                    let sz = save_size_bytes(&hdr.save_type);
+                    let sz = device::save_size_bytes(&hdr.save_type);
                     ui.label(format!("Save size: {} KB ({} bytes)", sz / 1024, sz));
                 });
             });
@@ -399,7 +422,7 @@ impl EzWriterApp {
     fn show_read_save(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Read Save to File");
         if let Some(ref hdr) = self.cart_header {
-            let sz = save_size_bytes(&hdr.save_type);
+            let sz = device::save_size_bytes(&hdr.save_type);
             ui.label(format!(
                 "Detected: {} → {} save ({} KB)",
                 hdr.title,
@@ -425,20 +448,20 @@ impl EzWriterApp {
                 .cart_header
                 .as_ref()
                 .map_or("FLASH 128K".to_string(), |h| h.save_type.clone());
+            // Show the progress bar immediately; the worker drives it via
+            // SaveReadProgress messages.
+            self.progress_value = 0.01;
             thread::spawn(move || {
-                let sz = save_size_bytes(&save_type);
+                let sz = device::save_size_bytes(&save_type);
                 // Genuine 128KB GBA FLASH (e.g. Pokémon Gen 3) needs the native
                 // two-bank reader; other types use the generic per-block read.
                 let all = if save_type.contains("FLASH") && sz == 128 * 1024 {
                     let txp = tx.clone();
                     match device::read_flash128_save(move |read, tot| {
-                        if read % (64 * 1024) == 0 {
-                            let _ = txp.send(BgCmd::Progress(format!(
-                                "[v] Dumping save... {} / {} KB",
-                                read / 1024,
-                                tot / 1024
-                            )));
-                        }
+                        let _ = txp.send(BgCmd::SaveReadProgress {
+                            bytes_read: read,
+                            total_bytes: tot,
+                        });
                     }) {
                         Ok(data) => data,
                         Err(e) => {
@@ -453,13 +476,10 @@ impl EzWriterApp {
                             Ok(data) => all.extend(data),
                             Err(_) => break,
                         }
-                        if all.len() % (64 * 1024) == 0 && !all.is_empty() {
-                            let _ = tx.send(BgCmd::Progress(format!(
-                                "[v] Dumping save... {} / {} KB",
-                                all.len() / 1024,
-                                sz / 1024
-                            )));
-                        }
+                        let _ = tx.send(BgCmd::SaveReadProgress {
+                            bytes_read: all.len() as u64,
+                            total_bytes: sz as u64,
+                        });
                     }
                     all
                 };
@@ -571,31 +591,31 @@ mod tests {
 
     #[test]
     fn save_size_flash_128k() {
-        assert_eq!(save_size_bytes("FLASH 128K"), 128 * 1024);
+        assert_eq!(device::save_size_bytes("FLASH 128K"), 128 * 1024);
     }
 
     #[test]
     fn save_size_sram_256k() {
-        assert_eq!(save_size_bytes("SRAM 256K"), 256 * 1024);
+        assert_eq!(device::save_size_bytes("SRAM 256K"), 256 * 1024);
     }
 
     #[test]
     fn save_size_sram_64k() {
-        assert_eq!(save_size_bytes("SRAM 64K"), 64 * 1024);
+        assert_eq!(device::save_size_bytes("SRAM 64K"), 64 * 1024);
     }
 
     #[test]
     fn save_size_eeprom_8k() {
-        assert_eq!(save_size_bytes("EEPROM 8K"), 8 * 1024);
+        assert_eq!(device::save_size_bytes("EEPROM 8K"), 8 * 1024);
     }
 
     #[test]
     fn save_size_eeprom_512() {
-        assert_eq!(save_size_bytes("EEPROM 512"), 512);
+        assert_eq!(device::save_size_bytes("EEPROM 512"), 512);
     }
 
     #[test]
     fn save_size_unknown_defaults_32k() {
-        assert_eq!(save_size_bytes("UNKNOWN"), 32 * 1024);
+        assert_eq!(device::save_size_bytes("UNKNOWN"), 32 * 1024);
     }
 }
