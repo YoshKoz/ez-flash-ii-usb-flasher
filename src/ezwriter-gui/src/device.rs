@@ -794,7 +794,12 @@ pub fn read_save_with_type(byte_addr: u32, count: u32, save_type: &str) -> Resul
     // before save-chip data is reliable).
     for _ in 0..8 {
         let mut drain = [0u8; 64];
-        if handle.read_bulk(DATA_EP, &mut drain, Duration::from_millis(200)).is_err() { break; }
+        if handle
+            .read_bulk(DATA_EP, &mut drain, Duration::from_millis(200))
+            .is_err()
+        {
+            break;
+        }
     }
 
     let mut all = Vec::with_capacity((count * 64) as usize);
@@ -878,7 +883,13 @@ pub fn read_flash128_save(cb: impl Fn(u64, u64)) -> Result<Vec<u8>> {
             handle
                 .write_bulk(
                     CMD_EP,
-                    &[0x03u8, (off & 0xFF) as u8, ((off >> 8) & 0xFF) as u8, 0x00, 0x00],
+                    &[
+                        0x03u8,
+                        (off & 0xFF) as u8,
+                        ((off >> 8) & 0xFF) as u8,
+                        0x00,
+                        0x00,
+                    ],
                     TIMEOUT,
                 )
                 .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
