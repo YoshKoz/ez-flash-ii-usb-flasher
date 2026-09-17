@@ -47,9 +47,8 @@ fn resolve_asset(name: &str) -> std::path::PathBuf {
     cwd
 }
 
-/// `loader_table1.bin`/`loader_table2.bin` are extracted from the vendor
-/// Windows driver and not redistributed here — supply your own next to the
-/// executable (or in CWD).
+/// `loader_table1.bin`/`loader_table2.bin` ship in `firmware/`, extracted
+/// from the vendor Windows driver — copy next to the executable (or CWD).
 fn load_loader_table(name: &str) -> Result<Vec<u8>> {
     let path = resolve_asset(name);
     std::fs::read(&path).with_context(|| {
