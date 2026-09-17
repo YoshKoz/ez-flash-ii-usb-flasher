@@ -5,6 +5,10 @@ EZ-Flash II / EZ-Writer II over USB, despite there being no documented
 "read save" command. This is the narrative behind the `save-read` subcommand
 and the `scratch/` + `tools/` reverse-engineering scripts.
 
+> **Note:** the `scratch/`, `tools/`, and root `disasm_*.py` scripts referenced
+> below have since been removed — their findings are fully absorbed into
+> `src/ezwriter-cli`'s `save-read` command. History still has them if needed.
+
 ---
 
 ## Why it took so long

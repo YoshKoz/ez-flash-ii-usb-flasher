@@ -211,7 +211,7 @@ The current `save-read` sends: `[0x14, suffix, 0x00]` then `[0x02, addr, suffix]
 
 ### Proposed test strategies
 
-The tool `tools/save_probe.py` tests all these strategies:
+The tool `tools/save_probe.py` (removed post-investigation, see `docs/save_reverse_engineering.md`) tested all these strategies:
 
 | # | Strategy | Expected if correct |
 |---|----------|-------------------|
