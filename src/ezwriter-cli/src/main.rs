@@ -30,8 +30,35 @@ const CPUCS_ADDR: u16 = 0x7F92;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Embedded firmware tables (compiled in so `reload` needs no file args)
-const TABLE1: &[u8] = include_bytes!("../loader_table1.bin");
-const TABLE2: &[u8] = include_bytes!("../loader_table2.bin");
+/// Looks in CWD first, then beside the running executable.
+fn resolve_asset(name: &str) -> std::path::PathBuf {
+    let cwd = std::path::PathBuf::from(name);
+    if cwd.exists() {
+        return cwd;
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let beside = dir.join(name);
+        if beside.exists() {
+            return beside;
+        }
+    }
+    cwd
+}
+
+/// `loader_table1.bin`/`loader_table2.bin` are extracted from the vendor
+/// Windows driver and not redistributed here — supply your own next to the
+/// executable (or in CWD).
+fn load_loader_table(name: &str) -> Result<Vec<u8>> {
+    let path = resolve_asset(name);
+    std::fs::read(&path).with_context(|| {
+        format!(
+            "couldn't read {name} (looked at {}); see README for how to obtain it",
+            path.display()
+        )
+    })
+}
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -1916,8 +1943,10 @@ fn cmd_read_reg(addr: u32) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_init_exact_embedded(handle: &DeviceHandle<GlobalContext>) -> Result<()> {
-    let chunks1 = parse_chunk_table(TABLE1)?;
-    let chunks2 = parse_chunk_table(TABLE2)?;
+    let table1 = load_loader_table("loader_table1.bin")?;
+    let table2 = load_loader_table("loader_table2.bin")?;
+    let chunks1 = parse_chunk_table(&table1)?;
+    let chunks2 = parse_chunk_table(&table2)?;
     cpucs(handle, 1)?;
     cpucs(handle, 1)?;
     write_chunks(handle, "table1", &chunks1)?;
