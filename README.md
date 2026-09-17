@@ -59,52 +59,50 @@ features exist for testing and recovery work, but you should back up first and r
 ### Build CLI
 
 ```console
-cd src/ezwriter-cli
-cargo build --release
+cargo build --release -p ezwriter-cli
 ```
+
+`tusbez.bin`, `loader_table1.bin`, and `loader_table2.bin` are **not included**
+in this repo — they're extracted from the original EZ-Writer II Windows driver,
+which is vendor firmware we can't redistribute. Pull them from your own driver
+install (or an existing dump) and place them next to the built executable.
 
 ### Detect → Init → Dump
 
 ```console
-# From the src/ezwriter-cli/ directory:
+cd target/release   # wherever tusbez.bin/loader_table*.bin live
 
 # 1. Detect
-./target/release/ezwriter-cli list
+./ezwriter-cli list
 
 # 2. Load firmware (if in bootloader mode 0547:2131)
-./target/release/ezwriter-cli firmware-download tusbez.bin
+./ezwriter-cli firmware-download tusbez.bin
 
 # 3. Identify cartridge
-./target/release/ezwriter-cli cart-info
+./ezwriter-cli cart-info
 
 # 4. Dump ROM + save
-./target/release/ezwriter-cli dump mygame.gba
-./target/release/ezwriter-cli save-read 0 2048 --output mygame.sav
+./ezwriter-cli dump mygame.gba
+./ezwriter-cli save-read 0 2048 --output mygame.sav
 ```
 
-(Windows: replace `./target/release/ezwriter-cli` with `.\target\release\ezwriter-cli.exe`)
+(Windows: replace `./ezwriter-cli` with `.\ezwriter-cli.exe`)
 
 `tusbez.bin` is the original 8051 firmware loaded into Cypress AN2131 RAM.
 Unplugging resets the chip, so firmware must be uploaded on every connection.
 
 ## GUI
 
-Build from `src/ezwriter-gui`:
-
 ```console
-cd src/ezwriter-gui
-cargo build --release
+cargo build --release -p ezwriter-gui
 ```
 
-Run from the same directory (loader files are in `src/ezwriter-gui`):
+Run from wherever `loader_table1.bin` and `loader_table2.bin` (see above) live:
 
 ```console
 ./target/release/ezwriter-gui          # Linux/macOS
 target\release\ezwriter-gui.exe       # Windows
 ```
-
-If you move the executable elsewhere, copy `loader_table1.bin` and
-`loader_table2.bin` next to it first.
 
 The GUI has five tabs:
 
