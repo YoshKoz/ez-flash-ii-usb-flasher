@@ -70,4 +70,4 @@ WinUSB must be installed via Zadig before any USB communication works. The `driv
 
 - `docs/protocol_notes.md` — full USB protocol reverse-engineering notes
 - `docs/original_driver_analysis.md` — Windows XP driver analysis
-- `src/*.py` — historical reverse-engineering probes, not production code
+- `docs/save_reverse_engineering.md` — narrative behind `save-read`; the scratch scripts it walks through were removed after their findings landed in the crates (still in git history)
