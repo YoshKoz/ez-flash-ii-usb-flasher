@@ -1970,18 +1970,20 @@ fn wait_for_mode(vid: u16, pid: u16, timeout_secs: u64) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn power_cycle_windows() -> Result<()> {
+fn power_cycle_windows(vid: &str, pid: &str) -> Result<()> {
     println!("Power cycling via Windows PnP manager...");
-    let script = r#"
-$dev = Get-PnpDevice -PresentOnly | Where-Object { $_.HardwareID -match 'VID_0548.*PID_1005' };
-if (-not $dev) { Write-Error 'Device not found'; exit 1 }
+    let script = format!(
+        r#"
+$dev = Get-PnpDevice -PresentOnly | Where-Object {{ $_.HardwareID -match 'VID_{vid}.*PID_{pid}' }};
+if (-not $dev) {{ Write-Error 'Device not found'; exit 1 }}
 Disable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false;
 Start-Sleep -Milliseconds 1000;
 Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false;
 Write-Output "Power cycled OK"
-"#;
+"#
+    );
     let out = std::process::Command::new("powershell")
-        .args(["-Command", script])
+        .args(["-Command", &script])
         .output()?;
     if !out.status.success() {
         bail!(
@@ -2022,6 +2024,21 @@ fn power_cycle_linux(device: &rusb::Device<GlobalContext>) -> Result<()> {
     Ok(())
 }
 
+/// macOS has no sysfs-style per-port power switch and no stock CLI for the
+/// Windows PnP disable/enable trick, so this falls back to a raw USB bus
+/// reset (`libusb_reset_device`) on the still-open handle. That's a weaker
+/// signal than an actual power cycle — it resets the USB PHY/link, not the
+/// device's power rail — so it may not force re-enumeration on every AN2131
+/// revision. Unverified on real hardware; needs confirmation from a Mac user.
+#[cfg(target_os = "macos")]
+fn power_cycle_macos(handle: &DeviceHandle<GlobalContext>) -> Result<()> {
+    println!("No macOS power-cycle API available; attempting a USB bus reset instead...");
+    handle
+        .reset()
+        .context("USB bus reset failed (unplug/replug the cable manually)")?;
+    Ok(())
+}
+
 fn cmd_reload() -> Result<()> {
     // Step 1: try CPUCS vendor request reset while in active mode
     // This works if the USB auto-vector ISR is still running despite the 8051 being stuck
@@ -2048,13 +2065,19 @@ fn cmd_reload() -> Result<()> {
         if find_device(EZWRITER_VID, EZWRITER_PID).is_ok() {
             println!("CPUCS reset didn't trigger re-enumeration — using OS power cycle...");
             #[cfg(target_os = "windows")]
-            power_cycle_windows()?;
+            power_cycle_windows("0548", "1005")?;
             #[cfg(target_os = "linux")]
             {
                 let (dev, _) = find_device(EZWRITER_VID, EZWRITER_PID)?;
                 power_cycle_linux(&dev)?;
             }
-            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+            #[cfg(target_os = "macos")]
+            {
+                let (dev, _) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+                let h = dev.open()?;
+                power_cycle_macos(&h)?;
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
             bail!("OS power cycle not supported on this platform. Unplug and replug manually.");
         }
     } else if in_boot {
@@ -2129,6 +2152,30 @@ fn main() -> Result<()> {
             let fw_data =
                 fs::read(&fw).with_context(|| format!("reading firmware: {}", fw.display()))?;
             download_firmware(&handle, &fw_data, no_cpu)?;
+
+            if !no_cpu && !wait_for_mode(EZWRITER_VID, EZWRITER_PID, 5) {
+                println!(
+                    "Device didn't re-enumerate as ACTIVE (0x{EZWRITER_VID:04x}:0x{EZWRITER_PID:04x}) \
+                     after 5s — CPU may be running but the host missed the USB reconnect."
+                );
+                println!("Attempting OS-level power cycle...");
+                #[cfg(target_os = "windows")]
+                let cycled = power_cycle_windows("0547", "2131").is_ok();
+                #[cfg(target_os = "linux")]
+                let cycled = power_cycle_linux(&device).is_ok();
+                #[cfg(target_os = "macos")]
+                let cycled = power_cycle_macos(&handle).is_ok();
+                #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+                let cycled = false;
+
+                if cycled && wait_for_mode(EZWRITER_VID, EZWRITER_PID, 5) {
+                    println!("Device is now ACTIVE.");
+                } else {
+                    println!(
+                        "Still not ACTIVE. Unplug and replug the USB cable, then run `list` again."
+                    );
+                }
+            }
         }
         Commands::InitExact { table1, table2 } => cmd_init_exact(&table1, &table2)?,
         Commands::CartInfo => cmd_cart_info()?,
