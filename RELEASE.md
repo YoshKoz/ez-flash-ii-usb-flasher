@@ -47,7 +47,7 @@ It lets you use the original USB flasher on modern Windows, Linux, and macOS wit
 What works now:
 
 - Detect the EZ-Writer II
-- Upload the included 8051 firmware to the Cypress AN2131
+- Upload the original 8051 firmware (pulled from your existing driver install) to the Cypress AN2131
 - Read cartridge headers
 - Dump GBA ROMs
 - Back up save files

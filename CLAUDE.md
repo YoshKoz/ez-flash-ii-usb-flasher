@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Two independent Rust crates for the EZ-Writer II / EZ-Flash II GBA cartridge flasher. Both live under `src/` with no shared workspace — build each separately.
+Two Rust crates for the EZ-Writer II / EZ-Flash II GBA cartridge flasher, under one Cargo workspace (root `Cargo.toml`).
 
 | Crate | Path | Purpose |
 |-------|------|---------|
@@ -14,18 +14,13 @@ Two independent Rust crates for the EZ-Writer II / EZ-Flash II GBA cartridge fla
 ## Build & run
 
 ```console
-# CLI
-cd src/ezwriter-cli
-cargo build --release
+# from repo root
+cargo build --release -p ezwriter-cli -p ezwriter-gui
 .\target\release\ezwriter-cli.exe list
-
-# GUI
-cd src/ezwriter-gui
-cargo build --release
 .\target\release\ezwriter-gui.exe
 ```
 
-No workspace — run `cargo` from inside each crate dir. No tests exist yet.
+No tests exist yet.
 
 ## Architecture
 
@@ -57,6 +52,14 @@ Firmware (`tusbez.bin`, `loader_table1.bin`, `loader_table2.bin`) is NOT in the 
 | `CPUCS_ADDR` | `0x7F92` | AN2131 CPU control/status register |
 | `CMD_EP` | `0x04` | Bulk OUT for commands |
 | `DATA_EP` | `0x82` | Bulk IN for data |
+
+## Subcommand stability (ezwriter-cli)
+
+| Stable (safe, read-only) | Experimental / destructive |
+|---|---|
+| `list`, `info`, `cart-info` | `write-rom`, `erase` (can brick cart) |
+| `dump`, `save-read` | `save-write`, `fpga-write`, `ram-write` |
+| `firmware-download`, `init-exact` | `probe-eeprom`, `bulk-test`, `passive-read` |
 
 ## Windows driver requirement
 
