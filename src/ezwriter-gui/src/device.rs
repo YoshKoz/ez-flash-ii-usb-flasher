@@ -497,6 +497,10 @@ impl CartSession {
     /// This is the ONLY path that supports full 24-bit word addressing (16 MB ROM).
     /// The firmware AN2131 SETUPDAT layout (bRequest at 0x7CC0, not bmRequestType):
     ///   SETUPDAT[0]=bRequest, [1]=wValue_lo, [2]=wValue_hi, [3]=wIndex_lo.
+    ///
+    /// Not called by the shipped GUI (`read_rom_chunk`'s bank byte covers today's
+    /// cartridge sizes) but kept for >8MB carts that need the full 24-bit range.
+    #[allow(dead_code)]
     pub fn read_rom_chunk_ep0(&self, byte_addr: u32) -> Result<[u8; 64]> {
         let word_addr = byte_addr / 2;
         let wvalue: u16 = (word_addr & 0xFFFF) as u16;
