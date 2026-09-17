@@ -62,10 +62,9 @@ features exist for testing and recovery work, but you should back up first and r
 cargo build --release -p ezwriter-cli
 ```
 
-`tusbez.bin`, `loader_table1.bin`, and `loader_table2.bin` are **not included**
-in this repo — they're extracted from the original EZ-Writer II Windows driver,
-which is vendor firmware we can't redistribute. Pull them from your own driver
-install (or an existing dump) and place them next to the built executable.
+`tusbez.bin`, `loader_table1.bin`, and `loader_table2.bin` ship in
+[`firmware/`](firmware/) — extracted from the original EZ-Writer II Windows
+driver. Copy them next to the built executable before running.
 
 ### Detect → Init → Dump
 
