@@ -41,7 +41,7 @@ Two-phase operation:
 1. **Bootloader** (`0547:2131`): upload `tusbez.bin` firmware over EP0 vendor request `0xA0`. Toggle CPUCS at `0x7F92` for reset/run. Device then re-enumerates.
 2. **Active** (`0548:1005`): bulk EP4 OUT for commands, EP2 IN for data. 24-bit bank addressing via byte[3] of the 4-byte command packet for >128KB ROM access.
 
-Firmware (`tusbez.bin`, `loader_table1.bin`, `loader_table2.bin`) is NOT in the repo — user must supply originals. The GUI expects loader files in CWD.
+Firmware (`tusbez.bin`, `loader_table1.bin`, `loader_table2.bin`) ships in `firmware/`. The GUI expects loader files in CWD or beside the executable.
 
 ## Key constants (both crates)
 
