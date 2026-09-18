@@ -239,7 +239,12 @@ fn find_device(vid: u16, pid: u16) -> Result<(Device<GlobalContext>, DeviceDescr
             return Ok((device, desc));
         }
     }
-    bail!("Device {vid:#06x}:{pid:#06x} not found");
+    bail!(
+        "Device {vid:#06x}:{pid:#06x} not found. \
+         Check cable/power, and on Windows confirm WinUSB is bound to this VID:PID in Zadig \
+         (List All Devices) — the device re-enumerates under a new VID:PID after firmware \
+         load, so it needs binding twice. See README Troubleshooting."
+    );
 }
 
 fn print_hex(data: &[u8]) {
