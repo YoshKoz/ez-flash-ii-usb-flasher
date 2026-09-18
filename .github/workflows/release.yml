@@ -49,6 +49,7 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/ezwriter-cli${{ matrix.suffix }} dist/ezwriter-cli-${{ matrix.target }}${{ matrix.suffix }}
           cp target/${{ matrix.target }}/release/ezwriter-gui${{ matrix.suffix }} dist/ezwriter-gui-${{ matrix.target }}${{ matrix.suffix }}
+          cp firmware/*.bin dist/
 
       - uses: actions/upload-artifact@v7
         with:

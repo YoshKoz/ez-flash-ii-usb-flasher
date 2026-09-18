@@ -26,6 +26,20 @@ the hardware through libusb.
 It supports the EZ-Writer II device that starts as `0547:2131` and, after firmware
 upload, re-enumerates as `0548:1005`.
 
+## Download
+
+Most people should start here, not with `cargo build`.
+
+1. Go to [Releases](https://github.com/YoshKoz/ez-flash-ii-usb-flasher/releases/latest).
+2. Download `ezwriter-gui` for your OS (Windows `.exe`, Linux, or macOS), plus the
+   `.bin` firmware files from the same release.
+3. Put all downloaded files in the same folder.
+4. **Windows only:** install the WinUSB driver with [Zadig](https://zadig.akeo.ie/)
+   first — see [Windows driver setup](#windows-driver-setup) below.
+5. Run `ezwriter-gui`.
+
+Prefer the command line, or want to build from source? See [CLI Quick Start](#cli-quick-start) below.
+
 ## Current Status
 
 | Feature | Status |
@@ -43,30 +57,39 @@ Read-only actions are the safest and are the intended public release path. Write
 features exist for testing and recovery work, but you should back up first and read
 [SAFETY.md](SAFETY.md).
 
-## Quick Start
+## Windows Driver Setup
 
-### Prerequisites
+Windows only — Linux/macOS need no driver (Linux may need a udev rule or root
+for USB access; macOS prompts for USB permission).
 
-- **Rust** — install from <https://rustup.rs/> if `cargo` is unavailable.
-- **USB driver (Windows only)** — use [Zadig](https://zadig.akeo.ie/):
-  1. Run Zadig as Administrator.
-  2. `Options → List All Devices`.
-  3. Select `EZ-Writer II` (`0547:2131` or `0548:1005`).
-  4. Choose `WinUSB`, click `Install Driver`.
-- **Linux** — may need a udev rule or root for direct USB access.
-- **macOS** — no driver needed, but grant USB permission when prompted.
+1. Run [Zadig](https://zadig.akeo.ie/) as Administrator.
+2. `Options → List All Devices`.
+3. Select `EZ-Writer II` (`0547:2131` or `0548:1005`).
+4. Choose `WinUSB`, click `Install Driver`.
 
-### Build CLI
+## GUI
+
+The GUI has five tabs:
+
+| Tab | Purpose |
+|-----|---------|
+| Status | Detect writer and initialize firmware |
+| Cart Info | Read title, game code, save type, and ROM size |
+| Read ROM | Dump a cartridge ROM to `.gba` |
+| Read Save | Dump save data to `.sav` |
+| Write Save | Restore save data after backup |
+
+## CLI Quick Start
+
+For scripting, or to build from source instead of using a [Release](#download) binary.
 
 ```console
-cargo build --release -p ezwriter-cli
+cargo build --release -p ezwriter-cli -p ezwriter-gui
 ```
 
 `tusbez.bin`, `loader_table1.bin`, and `loader_table2.bin` ship in
-[`firmware/`](firmware/) — extracted from the original EZ-Writer II Windows
-driver. Copy them next to the built executable before running.
-
-### Detect → Init → Dump
+[`firmware/`](firmware/) — copy them next to the built executable
+(`target/release/`) before running either binary.
 
 ```console
 cd target/release   # wherever tusbez.bin/loader_table*.bin live
@@ -89,29 +112,6 @@ cd target/release   # wherever tusbez.bin/loader_table*.bin live
 
 `tusbez.bin` is the original 8051 firmware loaded into Cypress AN2131 RAM.
 Unplugging resets the chip, so firmware must be uploaded on every connection.
-
-## GUI
-
-```console
-cargo build --release -p ezwriter-gui
-```
-
-Run from wherever `loader_table1.bin` and `loader_table2.bin` (see above) live:
-
-```console
-./target/release/ezwriter-gui          # Linux/macOS
-target\release\ezwriter-gui.exe       # Windows
-```
-
-The GUI has five tabs:
-
-| Tab | Purpose |
-|-----|---------|
-| Status | Detect writer and initialize firmware |
-| Cart Info | Read title, game code, save type, and ROM size |
-| Read ROM | Dump a cartridge ROM to `.gba` |
-| Read Save | Dump save data to `.sav` |
-| Write Save | Restore save data after backup |
 
 ## Safety Rules
 
@@ -164,10 +164,10 @@ Full protocol notes: [docs/protocol_notes.md](docs/protocol_notes.md)
 .
 |-- src/ezwriter-cli/       Rust CLI
 |-- src/ezwriter-gui/       Rust GUI
+|-- firmware/               Vendor AN2131 firmware + loader tables
 |-- docs/                   Protocol notes and original driver analysis
 |-- driver/winusb-inf/      Optional WinUSB INF files
-|-- SAFETY.md               Write-operation safety guide
-`-- RELEASE.md              Public release checklist and Reddit post draft
+`-- SAFETY.md               Write-operation safety guide
 ```
 
 > Originally created as `ezwriter-reverse` during reverse engineering.
