@@ -67,6 +67,21 @@ for USB access; macOS prompts for USB permission).
 3. Select `EZ-Writer II` (`0547:2131` or `0548:1005`).
 4. Choose `WinUSB`, click `Install Driver`.
 
+The device re-enumerates as a different VID:PID after firmware upload
+(`0547:2131` → `0548:1005`), so Windows sees it as a second device. If step 3
+still shows an unbound device after firmware load, run Zadig again and bind
+WinUSB to the new entry too — it may list under a different name (e.g.
+`EZ-Writer Fujitsu`) depending on driver revision, that is expected.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `loader_table1.bin` / `loader_table2.bin` missing | Old release, or files copied from a different driver revision (e.g. `ezloader2.bin`) | Use the exact `.bin` files from [Releases](https://github.com/YoshKoz/ez-flash-ii-usb-flasher/releases/latest) `firmware/`, not files from another tool |
+| Device shows unknown in Zadig at `0547:2131` | Expected — that is the bootloader, pre-firmware | Bind WinUSB anyway, run `firmware-download` / open GUI |
+| Writer LED stays red, "no cartridge detected" | Cartridge's save backup battery is dead — unrelated to USB/software | Confirm with a cart known to have a good battery; dead battery does not block ROM dump, only save timestamp/backup features |
+| WinUSB install seems to do nothing on second run | Bind was already applied to that VID:PID from a prior run | Re-run Zadig, select `List All Devices`, confirm both `0547:2131` and `0548:1005` show WinUSB |
+
 ## GUI
 
 The GUI has five tabs:
