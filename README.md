@@ -81,6 +81,9 @@ WinUSB to the new entry too — it may list under a different name (e.g.
 | Device shows unknown in Zadig at `0547:2131` | Expected — that is the bootloader, pre-firmware | Bind WinUSB anyway, run `firmware-download` / open GUI |
 | Writer LED stays red, "no cartridge detected" | Cartridge's save backup battery is dead — unrelated to USB/software | Confirm with a cart known to have a good battery; dead battery does not block ROM dump, only save timestamp/backup features |
 | WinUSB install seems to do nothing on second run | Bind was already applied to that VID:PID from a prior run | Re-run Zadig, select `List All Devices`, confirm both `0547:2131` and `0548:1005` show WinUSB |
+| One cartridge dumps corrupt while another dumps fine | Not the writer — the failing cartridge. Either unstable reads (failing flash, corroded traces, marginal battery) or a bootleg/repro PCB with a non-standard flash chip | Dump twice with `dump --verify`. Mismatches that move between runs = unstable cartridge. Matching-but-wrong output = bootleg/hacked image. Run `save-id` to check the save chip vendor |
+| `save-id` reports no change from the baseline read | The save chip did not enter READ ID mode — it is not a JEDEC-compatible flash | Typical of bootleg/reproduction PCBs. Saves from these carts cannot be dumped reliably |
+| Save dump refuses with "unrecognised save type" | Game code is not in the built-in catalogue, so the save chip type is unknown | Deliberate: guessing sends a packet that locks the CPLD until you replug. Identify the chip with `save-id`, then use `save-read -t f\|s\|e --output <file>` |
 
 ## GUI
 
@@ -121,7 +124,33 @@ cd target/release   # wherever tusbez.bin/loader_table*.bin live
 # 4. Dump ROM + save
 ./ezwriter-cli dump mygame.gba
 ./ezwriter-cli save-read 0 2048 --output mygame.sav
+
+# 5. If a dump still looks wrong, identify the save chip
+./ezwriter-cli save-id
+
+# 6. Measure how fast this hardware can actually dump
+./ezwriter-cli bench
 ```
+
+`dump` sizes the cartridge itself (by finding where the ROM mirrors onto
+itself), reads every 64-byte block twice and compares, and only renames
+`mygame.gba.partial` to `mygame.gba` once the whole image is complete and
+consistent. A dump that cannot be trusted fails with a non-zero exit code
+instead of writing a plausible-looking bad file. `--no-confirm` skips the
+double read (faster, less safe) and `--verify` adds a further full pass over
+the finished image.
+
+Save reads are confirmed and validated the same way: a Gen 3 `.sav` is only
+accepted if it is 131072 bytes and carries at least 14 section signatures.
+
+**Speed.** A dump currently costs one USB round trip plus a fixed 5 ms delay per
+64-byte chunk, so 16 MB takes roughly 23 minutes (46 with confirmation). The
+AN2131 is USB 1.1 full-speed, capping a 16 MB dump at about 14 seconds, so there
+is ~100× of headroom. `bench` measures the real per-chunk latency and how much of
+it a command queue hides; `dump --pipeline N` then uses that depth. See
+[docs/dump_performance.md](docs/dump_performance.md) for the measurements, the
+pipelining trade-off, and the batch-read loop that already exists in the
+firmware but is never enabled.
 
 (Windows: replace `./ezwriter-cli` with `.\ezwriter-cli.exe`)
 
