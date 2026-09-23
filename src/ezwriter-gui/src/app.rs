@@ -62,6 +62,10 @@ pub struct EzWriterApp {
     save_path: PathBuf,
     progress: String,
     progress_value: f32,
+    /// Read every ROM chunk twice and require agreement. Catches the stale-EP2
+    /// and marginal-cartridge failures that otherwise corrupt a dump silently,
+    /// at the cost of roughly doubling dump time.
+    confirm_chunks: bool,
     tx: Sender<BgCmd>,
     rx: Receiver<BgCmd>,
 }
@@ -78,6 +82,7 @@ impl Default for EzWriterApp {
             save_path: PathBuf::new(),
             progress: String::new(),
             progress_value: 0.0,
+            confirm_chunks: true,
             tx,
             rx,
         }
@@ -368,21 +373,27 @@ impl EzWriterApp {
         });
         if let Some(ref hdr) = self.cart_header {
             let rom_size = hdr.rom_size;
+            ui.checkbox(
+                &mut self.confirm_chunks,
+                "Verify every chunk (reads each block twice; slower, catches unstable cartridges)",
+            );
             let dump_label = format!("[v] Dump ROM ({:.0} MB)", rom_size as f64 / 1_048_576.0);
             if !self.rom_path.as_os_str().is_empty() && ui.button(&dump_label).clicked() {
                 let path = self.rom_path.clone();
                 let tx = self.tx.clone();
                 let total = rom_size as u64;
+                let confirm = self.confirm_chunks;
                 self.progress_value = 0.01;
                 thread::spawn(move || match device::CartSession::open() {
                     Ok(session) => {
-                        let result = session.dump_rom_stream(&path, total, 0, |written, total| {
-                            let _ = tx.send(BgCmd::DumpProgress {
-                                bytes_read: written,
-                                total_bytes: total,
+                        let result =
+                            session.dump_rom_stream(&path, total, 0, confirm, |written, total| {
+                                let _ = tx.send(BgCmd::DumpProgress {
+                                    bytes_read: written,
+                                    total_bytes: total,
+                                });
+                                Ok(())
                             });
-                            Ok(())
-                        });
                         match result {
                             Ok(()) => {
                                 let _ = tx.send(BgCmd::Progress(format!(
@@ -423,12 +434,24 @@ impl EzWriterApp {
         ui.heading("Read Save to File");
         if let Some(ref hdr) = self.cart_header {
             let sz = device::save_size_bytes(&hdr.save_type);
-            ui.label(format!(
-                "Detected: {} → {} save ({} KB)",
-                hdr.title,
-                hdr.save_type,
-                sz / 1024
-            ));
+            if device::is_known_save_type(&hdr.save_type) {
+                ui.label(format!(
+                    "Detected: {} → {} save ({} KB)",
+                    hdr.title,
+                    hdr.save_type,
+                    sz / 1024
+                ));
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 170, 0),
+                    format!(
+                        "Detected: {} — game code '{}' is not in the built-in database, so the save \
+                         chip type is unknown. Reading is disabled rather than guessed. Run \
+                         `ezwriter-cli save-id` to identify the chip.",
+                        hdr.title, hdr.code
+                    ),
+                );
+            }
         }
         ui.horizontal(|ui| {
             if ui.button("[..] Select File...").clicked()
@@ -448,16 +471,26 @@ impl EzWriterApp {
                 .cart_header
                 .as_ref()
                 .map_or("FLASH 128K".to_string(), |h| h.save_type.clone());
+            let confirm = self.confirm_chunks;
             // Show the progress bar immediately; the worker drives it via
             // SaveReadProgress messages.
             self.progress_value = 0.01;
             thread::spawn(move || {
+                if !device::is_known_save_type(&save_type) {
+                    let _ = tx.send(BgCmd::Error(format!(
+                        "Game code not recognised, so the save chip type is unknown ('{save_type}'). \
+                         Refusing to guess — the fallback path can lock the cartridge CPLD until the \
+                         device is replugged. Run `ezwriter-cli save-id` to identify the chip, then \
+                         `ezwriter-cli save-read -t f|s|e --output <file>`."
+                    )));
+                    return;
+                }
                 let sz = device::save_size_bytes(&save_type);
                 // Genuine 128KB GBA FLASH (e.g. Pokémon Gen 3) needs the native
                 // two-bank reader; other types use the generic per-block read.
                 let all = if save_type.contains("FLASH") && sz == 128 * 1024 {
                     let txp = tx.clone();
-                    match device::read_flash128_save(move |read, tot| {
+                    match device::read_flash128_save(confirm, move |read, tot| {
                         let _ = txp.send(BgCmd::SaveReadProgress {
                             bytes_read: read,
                             total_bytes: tot,
@@ -471,15 +504,29 @@ impl EzWriterApp {
                     }
                 } else {
                     let mut all = Vec::with_capacity(sz);
+                    let mut failure: Option<(u32, String)> = None;
                     for offset in (0..sz as u32).step_by(0x1000) {
-                        match device::read_save_with_type(offset, 64, &save_type) {
+                        match device::read_save_with_type(offset, 64, &save_type, confirm) {
                             Ok(data) => all.extend(data),
-                            Err(_) => break,
+                            Err(e) => {
+                                // Breaking out here used to write whatever had
+                                // been read so far as if it were the whole save.
+                                failure = Some((offset, e.to_string()));
+                                break;
+                            }
                         }
                         let _ = tx.send(BgCmd::SaveReadProgress {
                             bytes_read: all.len() as u64,
                             total_bytes: sz as u64,
                         });
+                    }
+                    if let Some((offset, e)) = failure {
+                        let _ = tx.send(BgCmd::Error(format!(
+                            "save read aborted at offset 0x{offset:X} after {} of {sz} bytes: {e}. \
+                             No file was written.",
+                            all.len()
+                        )));
+                        return;
                     }
                     all
                 };

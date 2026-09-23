@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use rusb::{Device, DeviceDescriptor, DeviceHandle, Direction, GlobalContext};
 use std::fmt::Write as _;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -115,6 +115,10 @@ enum Commands {
         /// ROM read offset for save area (in bytes)
         #[arg(long, default_value = "1572864")]
         rom_offset: u32,
+        /// Skip the per-chunk read confirmation (faster, but a stale USB buffer
+        /// or an unstable cartridge can then corrupt the save silently)
+        #[arg(long)]
+        no_confirm: bool,
     },
     /// Advanced save probe: try multiple strategies
     SaveProbe {
@@ -155,6 +159,39 @@ enum Commands {
         /// Fast pipelined mode (experimental)
         #[arg(long)]
         fast: bool,
+        /// Number of ROM read commands to keep in flight (default 1 = one
+        /// command per chunk). >1 trades a little safety for a large speedup;
+        /// run `bench` on your hardware first to find the depth it sustains.
+        #[arg(long, value_name = "N")]
+        pipeline: Option<usize>,
+        /// Re-read the cartridge after dumping and compare byte-for-byte.
+        /// Use this to tell "systematically wrong dump" (bootleg/hacked cart)
+        /// apart from "unstable reads" (failing cart / bad connection).
+        #[arg(long)]
+        verify: bool,
+        /// Skip the per-chunk read confirmation. Faster, but a stale USB
+        /// buffer or an unstable cartridge can then corrupt the dump silently.
+        #[arg(long)]
+        no_confirm: bool,
+    },
+    /// Read the save chip's JEDEC manufacturer/device ID (diagnostic)
+    ///
+    /// Uses only the verified cmd 0x14 / 0x20 / 0x03 primitives, never cmd 0x02.
+    /// A retail Gen 3 cart reports Macronix (0xC2); anything else is a strong
+    /// signal of a bootleg/reproduction PCB or a non-standard flash chip.
+    SaveId,
+    /// Benchmark ROM read paths on the connected hardware
+    ///
+    /// Measures per-chunk latency, whether the firmware streams more than one
+    /// packet per command, and sustained throughput at several pipeline depths.
+    /// Read-only: it never writes to the cartridge.
+    Bench {
+        /// 64-byte chunks to read per measurement
+        #[arg(default_value = "256")]
+        chunks: u32,
+        /// Pipeline depths to test
+        #[arg(long, value_delimiter = ',', default_value = "1,2,4,8,16")]
+        depths: Vec<usize>,
     },
     /// Reset USB device
     Reset,
@@ -955,6 +992,7 @@ fn cmd_save_read(
     use_reg: bool,
     use_rom_read: bool,
     rom_offset: u32,
+    confirm: bool,
 ) -> Result<()> {
     let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
     let handle = device.open()?;
@@ -978,14 +1016,29 @@ fn cmd_save_read(
     // The experimental --reg / --rom-read methods are kept for protocol research.
     if matches!(save_type, 'f' | 'F') && !use_rom_read && !use_reg {
         println!("Method: native FLASH (0x14 select + 0x20 bank switch + 0x03 read)");
-        let data = read_flash128_native(&handle, cmd_ep, data_ep)?;
+        let data = read_flash128_native(&handle, cmd_ep, data_ep, confirm)?;
         println!("  Read {} bytes", data.len());
-        println!("  Gen3 save signatures: {}", gen3_sig_count(&data));
+        let signatures = gen3_sig_count(&data);
+        println!("  Gen3 save signatures: {signatures}");
         if let Some(path) = output {
             fs::write(&path, &data)?;
             println!("Wrote {} bytes to {}", data.len(), path.display());
         }
         println!("Total: {} bytes", data.len());
+
+        if data.len() != 128 * 1024 {
+            bail!(
+                "expected a 131072-byte 128KB FLASH save, got {} bytes — the read did not complete",
+                data.len()
+            );
+        }
+        if signatures < 14 {
+            bail!(
+                "save validation failed: found {signatures} Gen 3 section signatures, expected at \
+                 least 14. The bytes were written for inspection, but this is not a usable save — \
+                 the cartridge is unstable, or it is not a retail Gen 3 cart."
+            );
+        }
         return Ok(());
     }
 
@@ -1046,6 +1099,7 @@ fn read_flash128_native(
     handle: &DeviceHandle<GlobalContext>,
     cmd_ep: u8,
     data_ep: u8,
+    confirm: bool,
 ) -> Result<Vec<u8>> {
     const BYTES_PER_BANK: u32 = 65536;
 
@@ -1087,30 +1141,44 @@ fn read_flash128_native(
         bank_switch(bank)?;
         let mut off = 0u32;
         while off < BYTES_PER_BANK {
-            drain();
-            handle
-                .write_bulk(
-                    cmd_ep,
-                    &[
-                        0x03u8,
-                        (off & 0xFF) as u8,
-                        ((off >> 8) & 0xFF) as u8,
-                        0x00,
-                        0x00,
-                    ],
-                    TIMEOUT,
-                )
-                .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
-            std::thread::sleep(Duration::from_millis(8));
-            let mut buf = [0u8; 64];
-            match handle.read_bulk(data_ep, &mut buf, Duration::from_secs(3)) {
-                Ok(len) => all.extend_from_slice(&buf[..len]),
+            let chunk = chunk_read_confirmed(off, confirm, || {
+                drain();
+                handle
+                    .write_bulk(
+                        cmd_ep,
+                        &[
+                            0x03u8,
+                            (off & 0xFF) as u8,
+                            ((off >> 8) & 0xFF) as u8,
+                            0x00,
+                            0x00,
+                        ],
+                        TIMEOUT,
+                    )
+                    .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
+                std::thread::sleep(Duration::from_millis(8));
+                let mut buf = [0u8; 64];
+                let len = handle
+                    .read_bulk(data_ep, &mut buf, Duration::from_secs(3))
+                    .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
+                if len != 64 {
+                    bail!(
+                        "short save read at bank{bank} off 0x{off:04X}: got {len} bytes, expected 64"
+                    );
+                }
+                Ok(buf)
+            });
+
+            match chunk {
+                Ok(c) => all.extend_from_slice(&c),
                 Err(e) => {
                     let _ = bank_switch(0);
                     let _ = fwrite(0x5555, 0xAA);
                     let _ = fwrite(0x2AAA, 0x55);
                     let _ = fwrite(0x5555, 0xF0);
-                    bail!("FLASH128 read error at bank{bank} off 0x{off:04X}: {e}");
+                    return Err(e.context(format!(
+                        "FLASH128 read failed at bank{bank} off 0x{off:04X}"
+                    )));
                 }
             }
             off += 64;
@@ -1122,6 +1190,162 @@ fn read_flash128_native(
     fwrite(0x2AAA, 0x55)?;
     fwrite(0x5555, 0xF0)?;
     Ok(all)
+}
+
+/// Decode a JEDEC manufacturer ID byte. Retail Gen 3 Pokémon carts use
+/// Macronix (0xC2) or Sanyo (0x62); anything else on a "Pokémon" cart is a
+/// strong bootleg/reproduction signal.
+fn jedec_manufacturer_name(id: u8) -> &'static str {
+    match id {
+        0x01 => "AMD/Spansion",
+        0x0B | 0x98 => "Toshiba/Kioxia",
+        0x1F => "Atmel",
+        0x20 => "STMicroelectronics",
+        0x37 => "AMIC",
+        0x62 => "Sanyo",
+        0x7F => "EON",
+        0x89 => "Intel",
+        0xBF => "SST",
+        0xC2 => "Macronix",
+        0xC8 => "GigaDevice",
+        0xEF => "Winbond",
+        _ => "unknown",
+    }
+}
+
+/// Read the save chip's JEDEC manufacturer/device ID.
+///
+/// Deliberately built only from the primitives the 128KB save reader already
+/// proved on hardware: cmd 0x14 (select FLASH), cmd 0x20 (single-byte write,
+/// used for flash command sequences) and cmd 0x03 (stream 64 bytes). It never
+/// sends cmd 0x02, which is documented to hang the 8051 in a write-completion
+/// poll and lock the CPLD until the device is physically replugged.
+///
+/// Sequence: reset to read-array -> baseline read -> READ ID (AA/55/90) ->
+/// read -> reset back to read-array.
+fn cmd_save_id() -> Result<()> {
+    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+    let handle = device.open()?;
+    let config = device.active_config_descriptor()?;
+    for iface in config.interfaces() {
+        for iface_desc in iface.descriptors() {
+            let _ = handle.claim_interface(iface_desc.interface_number());
+        }
+    }
+    for ep in 0x01u8..=0x07u8 {
+        let _ = handle.clear_halt(ep);
+        let _ = handle.clear_halt(ep | 0x80);
+    }
+
+    let cmd_ep = 0x04;
+    let data_ep = 0x82;
+
+    let fwrite = |addr: u16, data: u8| -> Result<()> {
+        handle.write_bulk(
+            cmd_ep,
+            &[0x20u8, (addr & 0xFF) as u8, (addr >> 8) as u8, data],
+            TIMEOUT,
+        )?;
+        std::thread::sleep(Duration::from_millis(4));
+        Ok(())
+    };
+    let drain = || {
+        let mut buf = [0u8; 64];
+        for _ in 0..64 {
+            if handle
+                .read_bulk(data_ep, &mut buf, Duration::from_millis(40))
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    let read64 = |addr: u16| -> Result<[u8; 64]> {
+        drain();
+        handle.write_bulk(
+            cmd_ep,
+            &[
+                0x03u8,
+                (addr & 0xFF) as u8,
+                ((addr >> 8) & 0xFF) as u8,
+                0x00,
+                0x00,
+            ],
+            TIMEOUT,
+        )?;
+        std::thread::sleep(Duration::from_millis(8));
+        let mut buf = [0u8; 64];
+        let len = handle
+            .read_bulk(data_ep, &mut buf, TIMEOUT)
+            .with_context(|| format!("save read at 0x{addr:04X}"))?;
+        if len != 64 {
+            bail!("short save read at 0x{addr:04X}: got {len} bytes, expected 64");
+        }
+        Ok(buf)
+    };
+    // Leave the flash in read-array mode (AA / 55 / F0).
+    let flash_reset = || -> Result<()> {
+        fwrite(0x5555, 0xAA)?;
+        fwrite(0x2AAA, 0x55)?;
+        fwrite(0x5555, 0xF0)?;
+        Ok(())
+    };
+
+    println!("Selecting FLASH save handler...");
+    handle.write_bulk(cmd_ep, &[0x14u8, 0x66, 0x00], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(50));
+    drain();
+    flash_reset()?;
+
+    let baseline = read64(0x0000)?;
+
+    println!("Issuing JEDEC READ ID (AA/55/90)...");
+    fwrite(0x5555, 0xAA)?;
+    fwrite(0x2AAA, 0x55)?;
+    fwrite(0x5555, 0x90)?;
+    let id = read64(0x0000)?;
+    flash_reset()?;
+
+    let hex = |b: &[u8; 64]| {
+        b[..8]
+            .iter()
+            .map(|v| format!("{v:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    println!();
+    println!("Save chip identification");
+    println!("  read-array baseline [0..8]: {}", hex(&baseline));
+    println!("  after READ ID       [0..8]: {}", hex(&id));
+    println!(
+        "  manufacturer: 0x{:02X} ({})",
+        id[0],
+        jedec_manufacturer_name(id[0])
+    );
+    println!("  device:       0x{:02X}", id[1]);
+
+    if id[..2] == baseline[..2] {
+        println!();
+        println!(
+            "  NOTE: the first two bytes are unchanged from the baseline read, so the chip did not \
+             enter READ ID mode. Either it is not a JEDEC-compatible flash, or it does not \
+             implement the AA/55/90 sequence (common on bootleg/reproduction PCBs)."
+        );
+    } else if id[0] == 0xC2 || id[0] == 0x62 {
+        println!();
+        println!(
+            "  This looks like a genuine Gen 3 save flash (Macronix/Sanyo). If the ROM dump still \
+             fails, the fault is more likely the cartridge's own hardware than the chip type."
+        );
+    } else {
+        println!();
+        println!(
+            "  Unrecognised vendor for a retail Pokémon cart. A bootleg/reproduction PCB is likely; \
+             the tool cannot reliably dump saves from non-standard flash."
+        );
+    }
+
+    Ok(())
 }
 
 /// Probe all save read strategies
@@ -1488,20 +1712,17 @@ fn cmd_cart_read(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_dump(
     mut output: PathBuf,
     start_addr: u32,
     size: u32,
-    _delay_ms: u64,
+    delay_ms: u64,
     fast: bool,
+    pipeline: Option<usize>,
+    verify: bool,
+    confirm: bool,
 ) -> Result<()> {
-    let total_size = if size == 0 {
-        32 * 1024 * 1024 - start_addr
-    } else {
-        size
-    };
-    let chunk_count = total_size.div_ceil(64);
-
     if output.extension().is_none_or(|e| e.is_empty()) {
         output.set_extension("gba");
     }
@@ -1529,8 +1750,37 @@ fn cmd_dump(
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    let cmd_ep = 0x04;
     let data_ep = 0x82;
+
+    let total_size = if size == 0 {
+        println!("No size given — detecting cartridge ROM size...");
+        let detected = detect_rom_size(&handle, delay_ms)?;
+        println!("  Detected a {} MB cartridge", detected / (1024 * 1024));
+        if start_addr >= detected {
+            bail!(
+                "start address 0x{start_addr:X} is past the end of the detected {detected}-byte \
+                 cartridge — pass an explicit size if you really want to read beyond it"
+            );
+        }
+        detected - start_addr
+    } else {
+        size
+    };
+
+    if total_size == 0 {
+        bail!("nothing to dump: size resolves to 0 bytes");
+    }
+    if start_addr as u64 + total_size as u64 > ROM_WINDOW_BYTES {
+        bail!(
+            "0x{start_addr:X} + {total_size} bytes runs past the {}-byte cartridge address window",
+            ROM_WINDOW_BYTES
+        );
+    }
+    let chunk_count = total_size.div_ceil(64);
+
+    // Never touch the destination until the dump is complete and consistent: a
+    // half-written .gba that looks like a valid dump is itself a corruption bug.
+    let partial = partial_path(&output)?;
 
     println!(
         "Dumping {} bytes ({} chunks) starting at 0x{:X} to {}",
@@ -1539,91 +1789,87 @@ fn cmd_dump(
         start_addr,
         output.display()
     );
-    if fast {
-        println!("  Mode: EP4 bulk pipelined (Experimental - fast, but potentially unreliable)");
+    // --fast is the historical depth-2 pipelined mode; --pipeline is explicit.
+    let depth = pipeline.unwrap_or(if fast { 2 } else { 1 }).max(1);
+
+    if depth > 1 {
+        println!(
+            "  Mode: EP4 bulk pipelined, {depth} commands in flight (unconfirmed — run \
+             `ezwriter-cli bench` to check the depth your hardware sustains)"
+        );
+    } else if confirm {
+        println!("  Mode: EP4 bulk non-pipelined, every chunk read twice and compared");
     } else {
-        println!("  Mode: EP4 bulk non-pipelined (Reliable - same as GUI)");
+        println!("  Mode: EP4 bulk non-pipelined (--no-confirm: a bad read can go unnoticed)");
     }
     println!();
 
-    let mut file = fs::File::create(&output)
-        .with_context(|| format!("Failed to create output file: {}", output.display()))?;
+    if partial.exists() {
+        fs::remove_file(&partial)
+            .with_context(|| format!("removing stale {}", partial.display()))?;
+    }
+    let mut file = fs::File::create(&partial)
+        .with_context(|| format!("Failed to create output file: {}", partial.display()))?;
     use std::io::Write;
+    let mut written: u64 = 0;
 
-    if fast {
-        let mut prev_buf: Option<[u8; 64]> = None;
-        for chunk in 0..=chunk_count {
-            if chunk < chunk_count {
-                let byte_addr = start_addr + chunk * 64;
-                let word_addr = byte_addr / 2;
-                let bank = (word_addr >> 16) as u8;
-                let addr_16 = (word_addr & 0xFFFF) as u16;
-                let cmd = [
-                    0x01u8,
-                    (addr_16 & 0xFF) as u8,
-                    ((addr_16 >> 8) & 0xFF) as u8,
-                    bank,
-                ];
-                if let Err(e) = handle.write_bulk(cmd_ep, &cmd, TIMEOUT) {
-                    println!("\n  ERROR at chunk {}: write_bulk: {e}", chunk);
-                    break;
-                }
+    if depth > 1 {
+        // Keep `depth` read commands in flight so the device is never idle while
+        // the host is doing USB bookkeeping. Reads stay strict: a short packet
+        // aborts rather than shifting everything after it.
+        let mut issued: u64 = 0;
+        let mut received: u64 = 0;
+        let mut last_pct = u64::MAX;
+
+        while issued < chunk_count as u64 && issued < depth as u64 {
+            send_rom_read_cmd(&handle, start_addr + (issued as u32) * 64)?;
+            issued += 1;
+        }
+
+        while received < chunk_count as u64 {
+            let byte_addr = start_addr + (received as u32) * 64;
+            let mut buf = [0u8; 64];
+            let len = handle
+                .read_bulk(data_ep, &mut buf, Duration::from_secs(3))
+                .with_context(|| format!("EP2 ROM read at byte_addr=0x{byte_addr:06X}"))?;
+            if len != 64 {
+                bail!(
+                    "short ROM read at byte_addr=0x{byte_addr:06X}: got {len} bytes, expected 64"
+                );
             }
-            if let Some(buf) = prev_buf.take() {
-                file.write_all(&buf)?;
+            file.write_all(&buf)?;
+            written += 64;
+            received += 1;
+
+            if issued < chunk_count as u64 {
+                send_rom_read_cmd(&handle, start_addr + (issued as u32) * 64)?;
+                issued += 1;
             }
-            if chunk < chunk_count {
-                let mut buf = [0u8; 64];
-                match handle.read_bulk(data_ep, &mut buf, Duration::from_millis(500)) {
-                    Ok(_len) => {
-                        prev_buf = Some(buf);
-                        if chunk % 256 == 0 && chunk > 0 {
-                            let pct = (chunk * 100) / chunk_count;
-                            let addr_mb = (start_addr + chunk * 64) as f64 / (1024.0 * 1024.0);
-                            print!("\r  Progress: {}% ({:.1} MB)", pct, addr_mb);
-                            std::io::stdout().flush()?;
-                        }
-                    }
-                    Err(e) => {
-                        println!("\n  ERROR at chunk {}: read_bulk: {e}", chunk);
-                        break;
-                    }
-                }
+
+            let pct = (received * 100) / chunk_count as u64;
+            if pct != last_pct {
+                last_pct = pct;
+                let addr_mb = byte_addr as f64 / (1024.0 * 1024.0);
+                print!("\r  Progress: {pct}% ({addr_mb:.1} MB)");
+                std::io::stdout().flush()?;
             }
         }
     } else {
-        let mut last_pct = 0u32;
+        let mut last_pct = u64::MAX;
         for chunk in 0..chunk_count {
             let byte_addr = start_addr + chunk * 64;
-            let word_addr = byte_addr / 2;
-            let addr_16 = (word_addr & 0xFFFF) as u16;
-            let bank = (word_addr >> 16) as u8;
+            let want = std::cmp::min(64, total_size - chunk * 64) as usize;
 
-            let cmd = [
-                0x01u8,
-                (addr_16 & 0xFF) as u8,
-                ((addr_16 >> 8) & 0xFF) as u8,
-                bank,
-            ];
+            let buf = if confirm {
+                rom_read_chunk_confirmed(&handle, byte_addr, delay_ms)?
+            } else {
+                rom_read_chunk(&handle, byte_addr, delay_ms)?
+            };
 
-            handle
-                .write_bulk(cmd_ep, &cmd, TIMEOUT)
-                .with_context(|| format!("EP4 ROM write at byte_addr=0x{byte_addr:06X}"))?;
+            file.write_all(&buf[..want])?;
+            written += want as u64;
 
-            std::thread::sleep(Duration::from_millis(5));
-
-            let mut buf = [0u8; 64];
-            match handle.read_bulk(data_ep, &mut buf, Duration::from_secs(3)) {
-                Ok(len) => {
-                    file.write_all(&buf[..len])?;
-                }
-                Err(e) => {
-                    println!("\n  ERROR at chunk {chunk}: read_bulk: {e}");
-                    break;
-                }
-            }
-
-            let pct = (chunk * 100) / chunk_count;
+            let pct = ((chunk as u64) * 100) / chunk_count as u64;
             if pct != last_pct {
                 last_pct = pct;
                 let addr_mb = byte_addr as f64 / (1024.0 * 1024.0);
@@ -1634,8 +1880,327 @@ fn cmd_dump(
     }
     println!();
 
-    let file_size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
-    println!("  Dumped {} bytes to {}", file_size, output.display());
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+
+    if written != total_size as u64 {
+        bail!(
+            "dump stopped after {written} of {total_size} bytes — {} left in place and {} was not \
+             touched",
+            partial.display(),
+            output.display()
+        );
+    }
+    let file_size = fs::metadata(&partial)
+        .with_context(|| format!("stat {}", partial.display()))?
+        .len();
+    if file_size != total_size as u64 {
+        bail!("size mismatch: wrote {file_size} bytes, expected {total_size}");
+    }
+
+    if verify {
+        verify_dump(&handle, &partial, start_addr, written, delay_ms)?;
+    }
+
+    fs::rename(&partial, &output)
+        .with_context(|| format!("renaming {} to {}", partial.display(), output.display()))?;
+
+    println!("  Dumped {file_size} bytes to {}", output.display());
+    Ok(())
+}
+
+/// Append `.partial` to a path's file name.
+fn partial_path(output: &Path) -> Result<PathBuf> {
+    let name = output
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("output path {} has no file name", output.display()))?;
+    let mut partial = output.to_path_buf();
+    partial.set_file_name(format!("{}.partial", name.to_string_lossy()));
+    Ok(partial)
+}
+
+/// Format the first 16 bytes of a chunk for diagnostics.
+fn hex_prefix(bytes: &[u8; 64]) -> String {
+    bytes[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The GBA cartridge bus exposes a 32 MB window.
+const ROM_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
+
+/// How many read/confirm rounds a chunk gets before the cartridge is declared
+/// unstable. A marginal cart usually settles within two or three reads.
+const ROM_READ_ATTEMPTS: u32 = 4;
+
+/// Read exactly one 64-byte ROM chunk via cmd 0x01 (16-bit word address + 8-bit
+/// bank in byte[3]). Strict: a short transfer is an error rather than silently
+/// padding the output.
+/// Issue a cmd 0x01 ROM read without waiting for its data.
+///
+/// The firmware's read routine is driven by a 16-bit block counter, but every
+/// call site in `tusbez.bin` hardcodes that counter to 1 (`MOV R3,#1; MOV R2,#0`
+/// at 0x0513, 0x0555 and 0x109C), so one command yields exactly one 64-byte
+/// packet. Overlapping commands on the host side is therefore the only way to
+/// hide the per-command round trip without patching the firmware.
+fn send_rom_read_cmd(handle: &DeviceHandle<GlobalContext>, byte_addr: u32) -> Result<()> {
+    let word_addr = byte_addr / 2;
+    let addr_16 = (word_addr & 0xFFFF) as u16;
+    let bank = (word_addr >> 16) as u8;
+    let cmd = [
+        0x01u8,
+        (addr_16 & 0xFF) as u8,
+        ((addr_16 >> 8) & 0xFF) as u8,
+        bank,
+    ];
+    handle
+        .write_bulk(0x04, &cmd, TIMEOUT)
+        .with_context(|| format!("EP4 ROM read cmd at byte_addr=0x{byte_addr:06X}"))?;
+    Ok(())
+}
+
+/// Read one 64-byte EP2 packet. Strict: a short packet is an error, never padding.
+fn read_rom_packet(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    timeout: Duration,
+) -> Result<[u8; 64]> {
+    let mut buf = [0u8; 64];
+    let len = handle
+        .read_bulk(0x82, &mut buf, timeout)
+        .with_context(|| format!("EP2 ROM read at byte_addr=0x{byte_addr:06X}"))?;
+    if len != 64 {
+        bail!("short ROM read at byte_addr=0x{byte_addr:06X}: got {len} bytes, expected 64");
+    }
+    Ok(buf)
+}
+
+fn rom_read_chunk(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    delay_ms: u64,
+) -> Result<[u8; 64]> {
+    send_rom_read_cmd(handle, byte_addr)?;
+    std::thread::sleep(Duration::from_millis(delay_ms));
+    read_rom_packet(handle, byte_addr, TIMEOUT)
+}
+
+/// Drain any stale EP2 packets left over from earlier commands.
+fn drain_ep2(handle: &DeviceHandle<GlobalContext>) {
+    let mut buf = [0u8; 64];
+    for _ in 0..64 {
+        if handle
+            .read_bulk(0x82, &mut buf, Duration::from_millis(40))
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+/// Read a chunk and require two consecutive reads to agree, retrying a few
+/// times before giving up.
+///
+/// A stale EP2 buffer or a marginal cartridge returns a *full-length* but wrong
+/// 64 bytes, which a single read cannot detect — that is how a dump ends up
+/// silently corrupt. Two agreeing reads cannot prove correctness, but they do
+/// catch the stale-buffer and unstable-cart cases.
+fn rom_read_chunk_confirmed(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    delay_ms: u64,
+) -> Result<[u8; 64]> {
+    chunk_read_confirmed(byte_addr, true, || {
+        rom_read_chunk(handle, byte_addr, delay_ms)
+    })
+}
+
+/// Confirm/retry loop shared by the ROM and save readers.
+///
+/// The firmware streams through a single EP2 buffer, so a mistimed or marginal
+/// read returns a *full-length* but stale block. Nothing in a single read
+/// distinguishes that from real data, so the only defence is to read twice and
+/// compare. With `confirm` false only hard errors are retried: faster, but a bad
+/// read can reach the output file unnoticed.
+fn chunk_read_confirmed<F>(addr: u32, confirm: bool, mut read: F) -> Result<[u8; 64]>
+where
+    F: FnMut() -> Result<[u8; 64]>,
+{
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 1..=ROM_READ_ATTEMPTS {
+        let first = match read() {
+            Ok(v) => v,
+            Err(e) => {
+                last_error = Some(e);
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        };
+
+        if !confirm {
+            return Ok(first);
+        }
+
+        match read() {
+            Ok(second) if second == first => return Ok(first),
+            Ok(second) => {
+                last_error = Some(anyhow::anyhow!(
+                    "two reads disagreed on attempt {attempt}/{ROM_READ_ATTEMPTS} \
+                     (first: {} / second: {})",
+                    hex_prefix(&first),
+                    hex_prefix(&second)
+                ));
+            }
+            Err(e) => last_error = Some(e),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    match last_error {
+        Some(e) => Err(e.context(format!(
+            "unstable cartridge read at 0x{addr:06X} after {ROM_READ_ATTEMPTS} attempts"
+        ))),
+        None => bail!("unstable cartridge read at 0x{addr:06X}"),
+    }
+}
+
+/// Detect the cartridge ROM size by finding where it mirrors onto itself.
+///
+/// The GBA exposes a 32 MB window; a smaller ROM ignores the address lines it
+/// does not have, so offset 0 reappears at the ROM's own size (a 16 MB cart
+/// mirrors at 0x1000000). Candidates are probed in ascending order and
+/// confirmed at a second offset, so a coincidental 64-byte match cannot truncate
+/// the dump. Defaulting to the full 32 MB window instead — as this command used
+/// to — makes every 16 MB cart dump twice its real size, with the upper half
+/// being a mirror image rather than ROM.
+fn detect_rom_size(handle: &DeviceHandle<GlobalContext>, delay_ms: u64) -> Result<u32> {
+    const SECOND_PROBE: u32 = 0x1000;
+
+    let head = rom_read_chunk(handle, 0, delay_ms)
+        .context("reading the cartridge header — is a cartridge inserted?")?;
+    if head[4..8] != [0x24, 0xFF, 0xAE, 0x51] {
+        bail!(
+            "no GBA cartridge header at address 0 (got {:02x} {:02x} {:02x} {:02x}) — is a \
+             cartridge inserted and seated properly?",
+            head[4],
+            head[5],
+            head[6],
+            head[7]
+        );
+    }
+    let tail = rom_read_chunk(handle, SECOND_PROBE, delay_ms)?;
+
+    mirrored_size(&head, &tail, |addr| rom_read_chunk(handle, addr, delay_ms))
+}
+
+/// ROM sizes a cartridge can plausibly have, smallest first.
+const ROM_SIZE_CANDIDATES: [u32; 5] = [0x100000, 0x200000, 0x400000, 0x800000, 0x1000000];
+
+/// Pick the smallest candidate size whose data mirrors `head`/`tail`.
+///
+/// Both probe points must match, so a chance 64-byte coincidence at one offset
+/// cannot silently halve the dump.
+fn mirrored_size<F>(head: &[u8; 64], tail: &[u8; 64], mut probe: F) -> Result<u32>
+where
+    F: FnMut(u32) -> Result<[u8; 64]>,
+{
+    const SECOND_PROBE: u32 = 0x1000;
+
+    for size in ROM_SIZE_CANDIDATES {
+        if probe(size)? != *head {
+            continue;
+        }
+        if probe(size + SECOND_PROBE)? == *tail {
+            return Ok(size);
+        }
+    }
+    Ok(ROM_WINDOW_BYTES as u32)
+}
+
+/// Re-read the cartridge and compare it byte-for-byte against the file just
+/// written. This is the test that separates the two failure modes users report
+/// as "corrupted dump":
+///
+///   * every run differs at the same offsets, or differs from a known-good
+///     image  -> the cartridge is not what the tool thinks it is
+///     (bootleg/repro PCB, ROM hack, wrong ROM size).
+///   * a second read disagrees with the first -> the reads themselves are
+///     unstable (failing cart, marginal battery, bad cable/hub).
+///
+/// Returns an error when any chunk differs, so scripts and CI see a non-zero
+/// exit code instead of a silently corrupt dump.
+fn verify_dump(
+    handle: &DeviceHandle<GlobalContext>,
+    output: &Path,
+    start_addr: u32,
+    written: u64,
+    delay_ms: u64,
+) -> Result<()> {
+    use std::io::Read;
+    use std::io::Write as _;
+
+    if written == 0 {
+        bail!("nothing was dumped, so there is nothing to verify");
+    }
+
+    let total_chunks = written.div_ceil(64);
+    println!("\nVerifying: re-reading {written} bytes from the cartridge...");
+
+    let mut file = fs::File::open(output)
+        .with_context(|| format!("re-open {} for verification", output.display()))?;
+
+    let mut offset: u64 = 0;
+    let mut mismatched: u64 = 0;
+    let mut first_mismatch: Option<(u64, [u8; 64], [u8; 64])> = None;
+    let mut file_buf = [0u8; 64];
+    let mut last_pct = 0u64;
+
+    while offset < written {
+        let want = std::cmp::min(64, (written - offset) as usize) as usize;
+        file.read_exact(&mut file_buf[..want])
+            .with_context(|| format!("read {} at 0x{offset:06X}", output.display()))?;
+
+        let cart = rom_read_chunk(handle, start_addr + offset as u32, delay_ms)?;
+        if cart[..want] != file_buf[..want] {
+            mismatched += 1;
+            if first_mismatch.is_none() {
+                let mut file_copy = [0u8; 64];
+                file_copy[..want].copy_from_slice(&file_buf[..want]);
+                first_mismatch = Some((offset, cart, file_copy));
+            }
+        }
+
+        offset += want as u64;
+        let pct = (offset * 100) / written;
+        if pct != last_pct {
+            last_pct = pct;
+            print!("\r  Verifying: {pct}%");
+            std::io::stdout().flush()?;
+        }
+    }
+    println!();
+
+    if let Some((off, cart, file_copy)) = first_mismatch {
+        println!("  First mismatch at 0x{off:06X}:");
+        println!("    cartridge: {}", hex_prefix(&cart));
+        println!("    file:      {}", hex_prefix(&file_copy));
+        bail!(
+            "VERIFY FAILED: {mismatched} of {total_chunks} chunks differ between the cartridge and \
+             {}. The cartridge is unstable, or it is not the ROM the tool assumed. Re-run the dump \
+             to see whether the mismatches move around (unstable reads) or stay at the same \
+             offsets (wrong/patched image).",
+            output.display()
+        );
+    }
+
+    println!(
+        "  Verify OK: cartridge matches {} ({total_chunks} chunks).",
+        output.display()
+    );
     Ok(())
 }
 
@@ -2192,6 +2757,7 @@ fn main() -> Result<()> {
             use_reg,
             use_rom_read,
             rom_offset,
+            no_confirm,
         } => cmd_save_read(
             addr,
             count,
@@ -2201,6 +2767,7 @@ fn main() -> Result<()> {
             use_reg,
             use_rom_read,
             rom_offset,
+            !no_confirm,
         )?,
         Commands::SaveProbe { count } => cmd_save_probe(count)?,
         Commands::CartRead {
@@ -2216,7 +2783,21 @@ fn main() -> Result<()> {
             size,
             delay,
             fast,
-        } => cmd_dump(output, start, size, delay, fast)?,
+            pipeline,
+            verify,
+            no_confirm,
+        } => cmd_dump(
+            output,
+            start,
+            size,
+            delay,
+            fast,
+            pipeline,
+            verify,
+            !no_confirm,
+        )?,
+        Commands::SaveId => cmd_save_id()?,
+        Commands::Bench { chunks, depths } => cmd_bench(chunks, depths)?,
         Commands::Reset => cmd_reset()?,
         Commands::Reload => cmd_reload()?,
         Commands::Probe { request, value } => cmd_probe(request, value)?,
@@ -2244,5 +2825,278 @@ fn main() -> Result<()> {
         Commands::ReadReg { addr } => cmd_read_reg(addr)?,
     }
 
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(seed: u8) -> [u8; 64] {
+        let mut c = [0u8; 64];
+        for (i, b) in c.iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8);
+        }
+        c
+    }
+
+    #[test]
+    fn confirmed_read_retries_transient_failures() {
+        let mut calls = 0;
+        let got = chunk_read_confirmed(0x40, true, || {
+            calls += 1;
+            if calls == 1 {
+                bail!("transient USB error");
+            }
+            Ok(chunk(7))
+        })
+        .unwrap();
+        assert_eq!(got, chunk(7));
+        assert_eq!(calls, 3, "one failed read, then the confirming pair");
+    }
+
+    #[test]
+    fn confirmed_read_rejects_a_cartridge_that_never_settles() {
+        let mut calls = 0;
+        let err = chunk_read_confirmed(0x80, true, || {
+            calls += 1;
+            Ok(chunk(calls as u8))
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unstable cartridge read"),
+            "unexpected error: {err}"
+        );
+        // Two reads per attempt, every attempt used.
+        assert_eq!(calls, (ROM_READ_ATTEMPTS * 2) as usize);
+    }
+
+    #[test]
+    fn unconfirmed_read_takes_the_first_result() {
+        let mut calls = 0;
+        let got = chunk_read_confirmed(0, false, || {
+            calls += 1;
+            Ok(chunk(calls as u8))
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(got, chunk(1));
+    }
+
+    #[test]
+    fn mirrored_size_finds_the_smallest_confirmed_mirror() {
+        let head = chunk(1);
+        let tail = chunk(2);
+        // A 16 MB cart: only offset 0x1000000 mirrors the probes.
+        let size = mirrored_size(&head, &tail, |addr| {
+            Ok(match addr {
+                a if a == 0x1000000 => head,
+                a if a == 0x1000000 + 0x1000 => tail,
+                _ => chunk(9),
+            })
+        })
+        .unwrap();
+        assert_eq!(size, 0x1000000);
+    }
+
+    #[test]
+    fn mirrored_size_ignores_a_single_offset_coincidence() {
+        let head = chunk(1);
+        let tail = chunk(2);
+        // Offset 0x800000 happens to match the header probe but not the second
+        // probe, so the real 16 MB mirror must still win.
+        let size = mirrored_size(&head, &tail, |addr| {
+            Ok(match addr {
+                0x800000 => head,
+                a if a == 0x1000000 => head,
+                a if a == 0x1000000 + 0x1000 => tail,
+                _ => chunk(9),
+            })
+        })
+        .unwrap();
+        assert_eq!(size, 0x1000000);
+    }
+
+    #[test]
+    fn mirrored_size_falls_back_to_the_full_window() {
+        let head = chunk(1);
+        let tail = chunk(2);
+        let size = mirrored_size(&head, &tail, |_| Ok(chunk(9))).unwrap();
+        assert_eq!(size, ROM_WINDOW_BYTES as u32);
+    }
+
+    #[test]
+    fn partial_path_appends_suffix() {
+        let p = partial_path(Path::new("/tmp/emerald.gba")).unwrap();
+        assert_eq!(p, PathBuf::from("/tmp/emerald.gba.partial"));
+    }
+}
+
+/// Benchmark the ROM read path on the connected hardware.
+///
+/// Read-only. Answers the three questions that decide how fast a dump can go:
+/// how long one command/response round trip costs, whether the firmware ever
+/// streams more than one packet per command, and how much of the round trip a
+/// host-side command queue can hide.
+fn cmd_bench(chunks: u32, depths: Vec<usize>) -> Result<()> {
+    use std::time::Instant;
+
+    if chunks == 0 {
+        bail!("--chunks must be at least 1");
+    }
+    if chunks > 0x4000 {
+        bail!("--chunks is capped at 16384 (1 MB) to stay inside the first ROM bank");
+    }
+    let bytes = chunks as u64 * 64;
+
+    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+    println!("Found EZ-Writer active mode.");
+    let handle = device.open()?;
+    let config = device.active_config_descriptor()?;
+    for iface in config.interfaces() {
+        for iface_desc in iface.descriptors() {
+            let _ = handle.claim_interface(iface_desc.interface_number());
+        }
+    }
+    for ep in 0x01u8..=0x07u8 {
+        let _ = handle.clear_halt(ep);
+        let _ = handle.clear_halt(ep | 0x80);
+    }
+
+    // Same preamble as `dump`, minus anything that writes to the cartridge.
+    let seq: [(u8, u16); 4] = [(0xAA, 0xAAAA), (0x55, 0x5554), (0xF0, 0xAAAA), (0xFF, 0)];
+    for (cb, a) in &seq {
+        let da = a / 2;
+        let c = [*cb, (da & 0xFF) as u8, ((da >> 8) & 0xFF) as u8, 0x00];
+        let _ = handle.write_bulk(0x04, &c, Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    println!(
+        "\nEZ-Writer read benchmark — {chunks} chunks ({} KB) per measurement\n",
+        bytes / 1024
+    );
+
+    // --- 1. Does one command produce more than one packet? ----------------
+    println!("1) Auto-stream probe: one command, then read until the endpoint is idle");
+    drain_ep2(&handle);
+    send_rom_read_cmd(&handle, 0)?;
+    let probe_start = Instant::now();
+    let mut packets = 0u32;
+    loop {
+        let mut buf = [0u8; 64];
+        match handle.read_bulk(0x82, &mut buf, Duration::from_millis(100)) {
+            Ok(64) => {
+                packets += 1;
+                if packets >= 512 {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    println!(
+        "   {packets} packet(s) arrived from a single command in {:?}",
+        probe_start.elapsed()
+    );
+    if packets <= 1 {
+        println!("   -> one 64-byte packet per command: speed is round-trip bound, not bus bound");
+    } else {
+        println!("   -> the firmware streams without further commands; a read-only loop wins");
+    }
+
+    // --- 2. Per-chunk round-trip latency ----------------------------------
+    println!("\n2) Round trip: send command, wait for its packet, repeat");
+    drain_ep2(&handle);
+    let mut times = Vec::with_capacity(chunks as usize);
+    let seq_start = Instant::now();
+    for i in 0..chunks {
+        let addr = i * 64;
+        let t = Instant::now();
+        send_rom_read_cmd(&handle, addr)?;
+        read_rom_packet(&handle, addr, TIMEOUT)?;
+        times.push(t.elapsed());
+    }
+    let seq_elapsed = seq_start.elapsed();
+    times.sort_unstable();
+    let median = times[times.len() / 2];
+    let p95 = times[(times.len() * 95) / 100];
+    let fastest = times[0];
+    let per_chunk = seq_elapsed.as_secs_f64() / chunks as f64;
+    println!("   per chunk: min {fastest:?}, median {median:?}, p95 {p95:?}");
+    println!(
+        "   sustained {:.1} KB/s -> 16 MB in {:.1} min",
+        (bytes as f64 / 1024.0) / seq_elapsed.as_secs_f64(),
+        (16.0 * 1024.0 * 1024.0 / 64.0 * per_chunk) / 60.0
+    );
+
+    // --- 3. Pipelined throughput at several depths -------------------------
+    println!("\n3) Pipelined: keep N commands in flight");
+    println!(
+        "   {:>6}  {:>12}  {:>12}  {:>14}",
+        "depth", "KB/s", "16 MB in", "vs depth 1"
+    );
+
+    let mut baseline: Option<f64> = None;
+    for depth in depths {
+        let depth = depth.max(1);
+        drain_ep2(&handle);
+
+        let t = Instant::now();
+        let mut issued: u32 = 0;
+        let mut received: u32 = 0;
+        let mut failed: Option<String> = None;
+
+        while issued < chunks && issued < depth as u32 {
+            if let Err(e) = send_rom_read_cmd(&handle, issued * 64) {
+                failed = Some(format!("could not queue depth {depth}: {e}"));
+                break;
+            }
+            issued += 1;
+        }
+
+        if failed.is_none() {
+            while received < chunks {
+                if let Err(e) = read_rom_packet(&handle, received * 64, TIMEOUT) {
+                    failed = Some(format!("read failed at depth {depth}: {e}"));
+                    break;
+                }
+                received += 1;
+                if issued < chunks {
+                    if let Err(e) = send_rom_read_cmd(&handle, issued * 64) {
+                        failed = Some(format!("could not keep depth {depth}: {e}"));
+                        break;
+                    }
+                    issued += 1;
+                }
+            }
+        }
+
+        if let Some(reason) = failed {
+            println!("   {depth:>6}  {reason}");
+            continue;
+        }
+
+        let elapsed = t.elapsed().as_secs_f64();
+        let kb_s = (bytes as f64 / 1024.0) / elapsed;
+        let mins = (16.0 * 1024.0 * 1024.0 / 1024.0) / kb_s / 60.0;
+        let speedup = match baseline {
+            Some(b) if b > 0.0 => format!("{:.1}x", kb_s / b),
+            _ => {
+                baseline = Some(kb_s);
+                "baseline".to_string()
+            }
+        };
+        println!(
+            "   {depth:>6}  {kb_s:>12.1}  {:>9.1} min  {speedup:>14}",
+            mins
+        );
+    }
+
+    println!(
+        "\nNote: the AN2131 is a USB 1.1 full-speed device (12 Mbit/s), so ~1.2 MB/s is the\n\
+         hard ceiling — 16 MB cannot beat roughly 14 s. `dump --pipeline N` uses the depth\n\
+         that measured best here."
+    );
     Ok(())
 }

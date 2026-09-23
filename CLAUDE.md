@@ -20,7 +20,7 @@ cargo build --release -p ezwriter-cli -p ezwriter-gui
 .\target\release\ezwriter-gui.exe
 ```
 
-No tests exist yet.
+Unit tests live in `#[cfg(test)]` modules at the bottom of `src/ezwriter-cli/src/main.rs` and `src/ezwriter-gui/src/device.rs`. CI runs `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
 
 ## Architecture
 
@@ -58,7 +58,7 @@ Firmware (`tusbez.bin`, `loader_table1.bin`, `loader_table2.bin`) ships in `firm
 | Stable (safe, read-only) | Experimental / destructive |
 |---|---|
 | `list`, `info`, `cart-info` | `write-rom`, `erase` (can brick cart) |
-| `dump`, `save-read` | `save-write`, `fpga-write`, `ram-write` |
+| `dump`, `save-read`, `save-id`, `bench` | `save-write`, `fpga-write`, `ram-write` |
 | `firmware-download`, `init-exact` | `probe-eeprom`, `bulk-test`, `passive-read` |
 
 ## Windows driver requirement
@@ -74,3 +74,4 @@ WinUSB must be installed via Zadig before any USB communication works. The `driv
 - `docs/protocol_notes.md` — full USB protocol reverse-engineering notes
 - `docs/original_driver_analysis.md` — Windows XP driver analysis
 - `docs/save_reverse_engineering.md` — narrative behind `save-read`; the scratch scripts it walks through were removed after their findings landed in the crates (still in git history)
+- `docs/dump_performance.md` — where dump time goes, the `bench` command, pipelining trade-offs, and the firmware batch-read loop whose counter every caller hardcodes to 1
