@@ -27,6 +27,27 @@ use those command names.
 - [ ] Attach screenshots or terminal output to the Reddit post if available.
 - [x] Rename the GitHub repo slug to `ez-flash-ii-usb-flasher`.
 
+## v0.1.2 Checklist
+
+Automated gates, run locally and in CI:
+
+- [x] `cargo fmt --check`
+- [x] `cargo clippy -- -D warnings`
+- [x] `cargo test` — 21 tests (7 CLI, 14 GUI)
+- [x] `cargo build --release -p ezwriter-cli -p ezwriter-gui`
+- [x] CLI smoke test with no device attached: `list`, `dump`, `bench`, `save-id` all
+      fail cleanly, and a failed `dump` leaves **no** file behind.
+
+Requires the physical EZ-Writer II, not yet run for this version:
+
+- [ ] `ezwriter-cli bench` — per-chunk latency and the pipeline depth this
+      hardware actually sustains (`docs/dump_performance.md` is unmeasured without it)
+- [ ] `ezwriter-cli dump <cart>.gba` — confirm the auto-detected ROM size matches
+      the cartridge and that the dump completes and verifies
+- [ ] `ezwriter-cli save-id` — confirm a retail cart reports Macronix (0xC2) or Sanyo (0x62)
+- [ ] `ezwriter-cli save-read -t f --output <cart>.sav` — confirmation and the
+      14-signature validation on a real save
+
 ## Reddit Post Draft
 
 Title:

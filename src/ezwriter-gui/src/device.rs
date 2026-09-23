@@ -12,7 +12,72 @@ pub const CPUCS_ADDR: u16 = 0x7F92;
 pub const CMD_EP: u8 = 0x04;
 pub const DATA_EP: u8 = 0x82;
 pub const ROM_READ_DELAY_MS: u64 = 5;
+/// How many read/confirm rounds a chunk gets before the cartridge is declared
+/// unstable. A marginal cart usually settles within two or three reads.
+pub const ROM_READ_ATTEMPTS: u32 = 4;
 const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Format the first 16 bytes of a chunk for error messages.
+fn hex_prefix(bytes: &[u8; 64]) -> String {
+    bytes[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Run `read` against one address until two consecutive results agree, retrying
+/// transient failures, then give up rather than returning data that cannot be
+/// trusted.
+///
+/// Both the ROM path and the save path suffer the same failure mode: the
+/// firmware streams through one EP2 buffer, so a mistimed or marginal read
+/// returns a *full-length* but stale block. Nothing in a single read
+/// distinguishes that from real data, so the only defence is to read twice and
+/// compare. With `confirm` false only hard errors are retried: faster, but a
+/// bad read can reach the output file unnoticed.
+fn read_confirmed<F>(addr: u32, confirm: bool, mut read: F) -> Result<[u8; 64]>
+where
+    F: FnMut() -> Result<[u8; 64]>,
+{
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 1..=ROM_READ_ATTEMPTS {
+        let first = match read() {
+            Ok(v) => v,
+            Err(e) => {
+                last_error = Some(e);
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        };
+
+        if !confirm {
+            return Ok(first);
+        }
+
+        match read() {
+            Ok(second) if second == first => return Ok(first),
+            Ok(second) => {
+                last_error = Some(anyhow::anyhow!(
+                    "two reads disagreed on attempt {attempt}/{ROM_READ_ATTEMPTS} \
+                     (first: {} / second: {})",
+                    hex_prefix(&first),
+                    hex_prefix(&second)
+                ));
+            }
+            Err(e) => last_error = Some(e),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    match last_error {
+        Some(e) => Err(e.context(format!(
+            "unstable cartridge read at 0x{addr:06X} after {ROM_READ_ATTEMPTS} attempts"
+        ))),
+        None => bail!("unstable cartridge read at 0x{addr:06X}"),
+    }
+}
 
 /// Resolve a bundled data file (firmware loader tables, etc.) without depending
 /// on the process working directory. Checks the current dir first, then the
@@ -445,10 +510,11 @@ impl CartSession {
     /// Read a single 64-byte chunk from the cartridge at the given byte address.
     ///
     /// Protocol: write 4-byte command to EP4 OUT, sleep `ROM_READ_DELAY_MS`,
-    /// read 64 bytes from EP2 IN.
+    /// read 64 bytes from EP2 IN. Word address goes in bytes[1..3], the 128 KB
+    /// page number in byte[3], which covers the full 32 MB cartridge window.
     ///
-    /// LIMITATION: 16-bit word address only. Wraps at 128 KB.
-    /// Use `read_rom_chunk_ep0` for full 16 MB access.
+    /// A short transfer is an error: accepting one would shift every following
+    /// chunk in the output file.
     pub fn read_rom_chunk(&self, byte_addr: u32) -> Result<[u8; 64]> {
         let word_addr = byte_addr / 2;
         let addr_16 = (word_addr & 0xFFFF) as u16;
@@ -482,6 +548,12 @@ impl CartSession {
         }
 
         Ok(buf)
+    }
+
+    /// Read a chunk, retrying transient failures, and optionally requiring two
+    /// consecutive reads to agree. See [`read_confirmed`].
+    pub fn read_rom_chunk_checked(&self, byte_addr: u32, confirm: bool) -> Result<[u8; 64]> {
+        read_confirmed(byte_addr, confirm, || self.read_rom_chunk(byte_addr))
     }
 
     /// Read a single 64-byte chunk using the EP0 vendor request path.
@@ -543,11 +615,14 @@ impl CartSession {
     /// - First writes to `{path}.partial`, renames to `path` only on success.
     /// - Verifies final file length equals `rom_size`.
     /// - Verifies GBA magic at offset 4.
+    /// - With `confirm`, every chunk is read twice and must agree; an unstable
+    ///   chunk is retried and the dump fails rather than writing bad bytes.
     pub fn dump_rom_stream<F>(
         &self,
         path: &Path,
         rom_size: u64,
         start_offset: u32,
+        confirm: bool,
         progress: F,
     ) -> Result<()>
     where
@@ -584,7 +659,8 @@ impl CartSession {
         let mut header_validated = false;
 
         while written < rom_size {
-            let chunk = self.read_rom_chunk(start_offset + written as u32)?;
+            let wish = std::cmp::min(CHUNK_SIZE, rom_size - written) as usize;
+            let chunk = self.read_rom_chunk_checked(start_offset + written as u32, confirm)?;
 
             if !header_validated {
                 eprintln!(
@@ -624,10 +700,10 @@ impl CartSession {
                 eprintln!("[dump] magic VALID");
             }
 
-            file.write_all(&chunk).with_context(|| {
+            file.write_all(&chunk[..wish]).with_context(|| {
                 format!("write at 0x{:06X} chunk {}", written, written / CHUNK_SIZE)
             })?;
-            written += CHUNK_SIZE;
+            written += wish as u64;
 
             if written - last_flush >= FLUSH_INTERVAL {
                 file.flush()
@@ -779,7 +855,30 @@ fn write_reg(handle: &DeviceHandle<GlobalContext>, addr: u32, data: u16) -> Resu
     Ok(())
 }
 
-pub fn read_save_with_type(byte_addr: u32, count: u32, save_type: &str) -> Result<Vec<u8>> {
+pub fn read_save_with_type(
+    byte_addr: u32,
+    count: u32,
+    save_type: &str,
+    confirm: bool,
+) -> Result<Vec<u8>> {
+    if !is_known_save_type(save_type) {
+        bail!(
+            "unrecognised save type '{save_type}' (game code not in the built-in database). \
+             Refusing to guess: the fallback path sends cmd 0x02 with suffix 0x66, which locks the \
+             cartridge CPLD until the device is replugged. Identify the chip with \
+             `ezwriter-cli save-id`, then read explicitly with \
+             `ezwriter-cli save-read -t f|s|e --output <file>`."
+        );
+    }
+    if save_read_handler_byte(save_type) == 0x66 {
+        bail!(
+            "refusing to read '{save_type}' over cmd 0x02: the FLASH handler byte (0x66) makes the \
+             firmware poll for a FLASH write completion that never arrives, locking the CPLD until \
+             the device is replugged. 128KB FLASH saves must use read_flash128_save(); no verified \
+             reader exists for other FLASH sizes."
+        );
+    }
+
     let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
 
     // Unlock EZ-Flash II CPLD before save-chip access. Without this, the save
@@ -809,23 +908,29 @@ pub fn read_save_with_type(byte_addr: u32, count: u32, save_type: &str) -> Resul
     let mut all = Vec::with_capacity((count * 64) as usize);
     for chunk in 0..count {
         let addr = byte_addr + chunk * 64;
-        let cmd = [
-            0x02u8,
-            (addr & 0xFF) as u8,
-            ((addr >> 8) & 0xFF) as u8,
-            ((addr >> 16) & 0xFF) as u8,
-            suffix,
-        ];
-        handle
-            .write_bulk(CMD_EP, &cmd, TIMEOUT)
-            .with_context(|| format!("save read write at addr=0x{addr:06X}"))?;
-        std::thread::sleep(Duration::from_millis(50));
+        let data = read_confirmed(addr, confirm, || {
+            let cmd = [
+                0x02u8,
+                (addr & 0xFF) as u8,
+                ((addr >> 8) & 0xFF) as u8,
+                ((addr >> 16) & 0xFF) as u8,
+                suffix,
+            ];
+            handle
+                .write_bulk(CMD_EP, &cmd, TIMEOUT)
+                .with_context(|| format!("save read write at addr=0x{addr:06X}"))?;
+            std::thread::sleep(Duration::from_millis(50));
 
-        let mut buf = [0u8; 64];
-        let len = handle
-            .read_bulk(DATA_EP, &mut buf, Duration::from_secs(30))
-            .with_context(|| format!("save read at addr=0x{addr:06X}"))?;
-        all.extend_from_slice(&buf[..len]);
+            let mut buf = [0u8; 64];
+            let len = handle
+                .read_bulk(DATA_EP, &mut buf, Duration::from_secs(30))
+                .with_context(|| format!("save read at addr=0x{addr:06X}"))?;
+            if len != 64 {
+                bail!("short save read at addr=0x{addr:06X}: got {len} bytes, expected 64");
+            }
+            Ok(buf)
+        })?;
+        all.extend_from_slice(&data);
     }
 
     // Re-lock CPLD (best effort)
@@ -839,7 +944,7 @@ pub fn read_save_with_type(byte_addr: u32, count: u32, save_type: &str) -> Resul
 /// only reachable through cmd 0x14 (select) + cmd 0x20 (byte write) + cmd 0x03
 /// (read 64). The flash is two 64KB banks switched by a JEDEC command, not an
 /// address pin. Returns 131072 bytes; leaves the flash in read-array mode.
-pub fn read_flash128_save(cb: impl Fn(u64, u64)) -> Result<Vec<u8>> {
+pub fn read_flash128_save(confirm: bool, cb: impl Fn(u64, u64)) -> Result<Vec<u8>> {
     let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
     const BYTES_PER_BANK: u32 = 65536;
     let total = (BYTES_PER_BANK * 2) as u64;
@@ -883,39 +988,51 @@ pub fn read_flash128_save(cb: impl Fn(u64, u64)) -> Result<Vec<u8>> {
         bank_switch(bank)?;
         let mut off = 0u32;
         while off < BYTES_PER_BANK {
-            drain();
-            handle
-                .write_bulk(
-                    CMD_EP,
-                    &[
-                        0x03u8,
-                        (off & 0xFF) as u8,
-                        ((off >> 8) & 0xFF) as u8,
-                        0x00,
-                        0x00,
-                    ],
-                    TIMEOUT,
-                )
-                .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
-            std::thread::sleep(Duration::from_millis(8));
+            let chunk = read_confirmed(off, confirm, || {
+                drain();
+                handle
+                    .write_bulk(
+                        CMD_EP,
+                        &[
+                            0x03u8,
+                            (off & 0xFF) as u8,
+                            ((off >> 8) & 0xFF) as u8,
+                            0x00,
+                            0x00,
+                        ],
+                        TIMEOUT,
+                    )
+                    .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
+                std::thread::sleep(Duration::from_millis(8));
 
-            let mut buf = [0u8; 64];
-            match handle.read_bulk(DATA_EP, &mut buf, Duration::from_secs(3)) {
-                Ok(len) => {
-                    all.extend_from_slice(&buf[..len]);
-                    cb(all.len() as u64, total);
+                let mut buf = [0u8; 64];
+                let len = handle
+                    .read_bulk(DATA_EP, &mut buf, Duration::from_secs(3))
+                    .with_context(|| format!("FLASH128 bank{bank} off 0x{off:04X}"))?;
+                if len != 64 {
+                    bail!(
+                        "short save read at bank{bank} off 0x{off:04X}: got {len} bytes, expected 64"
+                    );
                 }
+                Ok(buf)
+            });
+
+            let chunk = match chunk {
+                Ok(c) => c,
                 Err(e) => {
-                    // Leave flash in read-array mode before bailing.
+                    // Leave the flash in read-array mode before bailing.
                     let _ = bank_switch(0);
                     let _ = fwrite(0x5555, 0xAA);
                     let _ = fwrite(0x2AAA, 0x55);
                     let _ = fwrite(0x5555, 0xF0);
-                    return Err(anyhow::anyhow!(
-                        "FLASH128 read error at bank{bank} off 0x{off:04X}: {e}"
-                    ));
+                    return Err(e.context(format!(
+                        "FLASH128 read failed at bank{bank} off 0x{off:04X}"
+                    )));
                 }
-            }
+            };
+
+            all.extend_from_slice(&chunk);
+            cb(all.len() as u64, total);
             off += 64;
         }
     }
@@ -932,9 +1049,21 @@ pub fn read_flash128_save(cb: impl Fn(u64, u64)) -> Result<Vec<u8>> {
 fn save_read_handler_byte(save_type: &str) -> u8 {
     if save_type.contains("EEPROM") {
         0x65 // XRL #0x65 branch at 0x07FF in tusbez.bin
+    } else if save_type.contains("SRAM") {
+        0x73 // cmd 0x14 SRAM select: (0x73 & 7) * 2 = 0x06 -> SRAM bus mapping
     } else {
-        0x66 // FLASH/SRAM handler, CJNE branch at 0x07D5 in tusbez.bin
+        0x66 // FLASH handler, CJNE branch at 0x07D5 in tusbez.bin
     }
+}
+
+/// True when the built-in catalogue recognises this save type.
+///
+/// Unknown types must never be guessed at. `save_read_handler_byte` falls back
+/// to the FLASH handler byte (0x66), and cmd 0x02 with suffix 0x66 is the packet
+/// that hangs the 8051 in a FLASH write-completion poll and locks the CPLD until
+/// the device is physically replugged.
+pub fn is_known_save_type(save_type: &str) -> bool {
+    save_type.contains("FLASH") || save_type.contains("SRAM") || save_type.contains("EEPROM")
 }
 
 pub fn gen3_save_signature_count(data: &[u8]) -> usize {
@@ -955,6 +1084,15 @@ pub fn validate_save_dump(data: &[u8], save_type: &str) -> Result<()> {
     }
     if starts_with_known_rom_stub(data) {
         bail!("save data starts with the known ROM/stale endpoint pattern, not save RAM");
+    }
+    // A read that stopped early used to be handed to the user as a save file.
+    let expected = save_size_bytes(save_type);
+    if data.len() != expected {
+        bail!(
+            "save dump is {} bytes but a {save_type} save is {expected} bytes — the read stopped \
+             early, so this is a partial dump, not a save",
+            data.len()
+        );
     }
     if save_type.contains("FLASH") && data.len() >= 128 * 1024 {
         let signatures = gen3_save_signature_count(data);
@@ -990,7 +1128,7 @@ pub fn parse_gba_header(buf: &[u8]) -> Result<CartHeader> {
         .trim_end_matches(char::from(0))
         .to_string();
     let save_type = lookup_game(&code)
-        .map_or("SRAM 32K", |e| e.save_type)
+        .map_or("UNKNOWN", |e| e.save_type)
         .to_string();
     let rom_size = lookup_game(&code).map_or(0x1000000, |e| e.rom_size);
     let mut raw_header = [0u8; 256];
@@ -1025,6 +1163,13 @@ pub fn dump_to_file(path: &PathBuf, data: &[u8]) -> Result<()> {
 ///   2. Erase sectors for FLASH using cmd 0x15
 ///   3. Write 64-byte chunks using cmd 0x03 + address + suffix + data
 pub fn write_save(data: &[u8], save_type: &str, cb: impl Fn(u64, u64)) -> Result<String> {
+    if !is_known_save_type(save_type) {
+        bail!(
+            "unrecognised save type '{save_type}' (game code not in the built-in database). \
+             Refusing to write: the fallback would erase and program the chip as FLASH. \
+             Identify the chip with `ezwriter-cli save-id` first."
+        );
+    }
     let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
     let suffix = if save_type.contains("EEPROM") {
         b'e'
@@ -1116,12 +1261,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_gba_header_unknown_code_defaults_sram_32k() {
+    fn parse_gba_header_unknown_code_is_flagged_unknown() {
         let mut buf = vec![0u8; 256];
         buf[4..8].copy_from_slice(&[0x24, 0xFF, 0xAE, 0x51]);
         buf[0xAC..0xB0].copy_from_slice(b"XXXX");
         let hdr = parse_gba_header(&buf).unwrap();
-        assert_eq!(hdr.save_type, "SRAM 32K");
+        assert_eq!(hdr.save_type, "UNKNOWN");
+        assert!(!is_known_save_type(&hdr.save_type));
+    }
+
+    #[test]
+    fn known_save_types_are_recognised() {
+        assert!(is_known_save_type("FLASH 128K"));
+        assert!(is_known_save_type("SRAM 32K"));
+        assert!(is_known_save_type("EEPROM 512"));
+        assert!(!is_known_save_type("UNKNOWN"));
+    }
+
+    #[test]
+    fn save_handler_bytes_match_documented_select_suffixes() {
+        assert_eq!(save_read_handler_byte("FLASH 128K"), 0x66);
+        assert_eq!(save_read_handler_byte("SRAM 32K"), 0x73);
+        assert_eq!(save_read_handler_byte("EEPROM 512"), 0x65);
+        // Any type that misses the catalogue falls back to the FLASH handler,
+        // which is exactly what the cmd 0x02 guards exist to catch.
+        assert_eq!(save_read_handler_byte("UNKNOWN"), 0x66);
     }
 
     #[test]
