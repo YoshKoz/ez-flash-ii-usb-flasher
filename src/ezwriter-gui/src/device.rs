@@ -11,7 +11,12 @@ pub const EZWRITER_PID: u16 = 0x1005;
 pub const CPUCS_ADDR: u16 = 0x7F92;
 pub const CMD_EP: u8 = 0x04;
 pub const DATA_EP: u8 = 0x82;
-pub const ROM_READ_DELAY_MS: u64 = 5;
+/// Delay between a ROM read command and reading its packet.
+///
+/// Measured on real hardware: 2 ms reproduces a 256 KB reference byte-for-byte
+/// across repeated runs, while 0 ms and 1 ms return stale packet data and
+/// produce a different file. Do not lower this without re-measuring.
+pub const ROM_READ_DELAY_MS: u64 = 2;
 /// How many read/confirm rounds a chunk gets before the cartridge is declared
 /// unstable. A marginal cart usually settles within two or three reads.
 pub const ROM_READ_ATTEMPTS: u32 = 4;
