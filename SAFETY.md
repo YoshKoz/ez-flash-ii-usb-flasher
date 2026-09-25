@@ -10,15 +10,14 @@
 | `identify` / `cart-info` | **Low** | Read-only command to cartridge |
 | `dump` | **Low** | Read-only ROM dump |
 | `save-read` | **Low** | Read-only save data |
-| `write-save` | **Medium** | Save data write; back up first |
-| `write-rom` | **HIGH** | Experimental; can brick cart if interrupted |
-| `erase` | **HIGH** | Destructive - wipes cartridge |
+| `save-write` | **Medium** | Save data write; back up first |
+| `rom-write` | **HIGH** | Experimental; erases then writes ROM. Can brick cart if interrupted |
 
 ## Recovery Options
 
 ### Bricked Cartridge
 - If write is interrupted, the cartridge may enter an indeterminate state.
-- Recovery: Re-run `write-rom` with a known-good ROM (do NOT erase first).
+- Recovery: Re-run `rom-write` with a known-good ROM (do NOT erase first).
 - The EZ-Flash II has a bootloader in ROM that can usually recover from partial writes.
 
 ### Bricked Writer

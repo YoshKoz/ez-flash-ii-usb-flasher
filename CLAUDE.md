@@ -27,7 +27,7 @@ Unit tests live in `#[cfg(test)]` modules at the bottom of `src/ezwriter-cli/src
 ### CLI (`src/ezwriter-cli/src/main.rs`)
 Single-file. All USB logic, subcommands, and protocol state live here. Uses `rusb` (vendored libusb) directly with `clap` derive for CLI.
 
-Key subcommands: `list`, `info`, `firmware-download`, `init-exact`, `cart-info`, `cart-read`, `dump`, `save-read`, `save-write`, `write-rom`, `erase`.
+Key subcommands: `list`, `info`, `firmware-download`, `init-exact`, `cart-info`, `cart-read`, `dump`, `save-read`, `save-write`, `rom-write`.
 
 ### GUI (`src/ezwriter-gui/src/`)
 - `device.rs` — all USB/protocol logic (mirrors CLI logic), `GAME_DB` static lookup table
@@ -57,7 +57,7 @@ Firmware (`tusbez.bin`, `loader_table1.bin`, `loader_table2.bin`) ships in `firm
 
 | Stable (safe, read-only) | Experimental / destructive |
 |---|---|
-| `list`, `info`, `cart-info`, `save-id` | `write-rom`, `erase` (can brick cart) |
+| `list`, `info`, `cart-info`, `save-id` | `rom-write` (can brick cart) |
 | `dump`, `save-read`, `cart-read`, `bench` | `save-write`, `ram-write`, `write-reg` |
 | `firmware-download`, `init-exact`, `reload` | `save-probe`, `stream-probe`, `probe`, `bulk-test`, `passive-read` |
 
@@ -67,7 +67,7 @@ WinUSB must be installed via Zadig before any USB communication works. The `driv
 
 ## Safety
 
-`write-rom` and `erase` are experimental and can brick cartridges. See `SAFETY.md`. Read-only ops (`dump`, `save-read`, `cart-info`) are safe.
+`rom-write` is experimental and can brick cartridges. See `SAFETY.md`. Read-only ops (`dump`, `save-read`, `cart-info`) are safe.
 
 ## Docs
 

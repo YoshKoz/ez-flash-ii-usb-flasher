@@ -29,6 +29,9 @@ const CPUCS_ADDR: u16 = 0x7F92;
 /// Timeout for USB control transfers
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Bulk OUT endpoint the host sends command packets to.
+const CMD_EP: u8 = 0x04;
+
 /// Embedded firmware tables (compiled in so `reload` needs no file args)
 /// Looks in CWD first, then beside the running executable.
 fn resolve_asset(name: &str) -> std::path::PathBuf {
@@ -242,21 +245,18 @@ enum Commands {
     /// Write ROM data to cartridge
     RomWrite {
         input: PathBuf,
-        /// Starting byte address
+        /// Starting byte address (must be 16-bit aligned)
         #[arg(default_value = "0")]
         addr: u32,
         /// Delay between chunks in ms
         #[arg(default_value = "50", long)]
         delay: u64,
-        /// Skip erase
+        /// Skip the erase pass (only safe if the target is already blank)
         #[arg(long)]
         no_erase: bool,
-        /// Write command byte
-        #[arg(default_value = "0x41", long)]
-        write_cmd: u8,
-        /// Erase command byte
-        #[arg(default_value = "0x40", long)]
-        erase_cmd: u8,
+        /// Read the whole range back and compare after writing
+        #[arg(long)]
+        verify: bool,
     },
     /// Reload firmware: CPUCS reset → OS power cycle if needed → auto init-exact
     Reload,
@@ -2297,16 +2297,51 @@ fn cmd_save_write(
     Ok(())
 }
 
+/// ROM write/erase, implemented against the real firmware handlers.
+///
+/// Reverse-engineered from `tusbez.bin` + `loader_table2.bin` (see
+/// `docs/firmware_re_rom_write.md`):
+///
+/// * `CMD_ROM_WRITE` (0x04) copies the EP4 payload straight to cartridge ROM:
+///   packet `[0x04, addr_lo, addr_hi, 0, count_lo, count_hi, payload..]`.
+/// * The NOR flash uses the AMD/Fujitsu command set in word mode; erase is the
+///   `AA/55` unlock, `0x0F` erase-setup, then `0x29` confirm per sector, all
+///   issued through the ROM command channel.
+///
+/// This deliberately ignores the old `--write-cmd` / `--erase-cmd` guesses: the
+/// handler command and the flash command are different things.
 fn cmd_rom_write(
     input: PathBuf,
     byte_addr: u32,
     delay_ms: u64,
     no_erase: bool,
-    write_cmd: u8,
-    erase_cmd: u8,
+    verify: bool,
 ) -> Result<()> {
     let data =
         fs::read(&input).with_context(|| format!("reading ROM file: {}", input.display()))?;
+    if data.is_empty() {
+        bail!("refusing to write an empty file");
+    }
+    if !byte_addr.is_multiple_of(2) {
+        bail!("start offset 0x{byte_addr:X} must be 16-bit aligned (word-addressed flash)");
+    }
+    // Command 0x04 addresses within a single 64 KB window: the firmware's byte
+    // loop increments only the 16-bit address, and there is no bank byte in the
+    // packet. Writing across a window boundary would wrap instead of advancing,
+    // so refuse rather than silently corrupt.
+    const WINDOW: u32 = 0x10000;
+    let end32 = byte_addr
+        .checked_add(data.len() as u32)
+        .context("ROM write range overflows 32-bit address space")?;
+    if byte_addr / WINDOW != (end32 - 1) / WINDOW {
+        bail!(
+            "ROM write range 0x{byte_addr:06X}..0x{end32:06X} crosses a 64 KB window. \
+             Command 0x04 addresses one window at a time and has no bank byte; write the \
+             image window by window, or extend the tool once the bank-select sequence is \
+             confirmed."
+        );
+    }
+
     let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
     let handle = device.open()?;
     let config = device.active_config_descriptor()?;
@@ -2320,64 +2355,68 @@ fn cmd_rom_write(
         let _ = handle.clear_halt(ep | 0x80);
     }
 
-    let cmd_ep = 0x04;
-    let data_ep = 0x82;
     let delay = Duration::from_millis(delay_ms);
-
+    let end = byte_addr as u64 + data.len() as u64;
     println!(
-        "Writing {} bytes to ROM at offset 0x{:X}",
+        "Writing {} bytes to ROM at 0x{:06X}..0x{:06X}",
         data.len(),
-        byte_addr
+        byte_addr,
+        end
     );
 
-    let seq: [(u8, u16); 4] = [(0xAA, 0xAAAA), (0x55, 0x5554), (0xF0, 0xAAAA), (0xFF, 0)];
-    for (cb, a) in &seq {
-        let da = a / 2;
-        let c = [*cb, (da & 0xFF) as u8, ((da >> 8) & 0xFF) as u8, 0x00];
-        let _ = handle.write_bulk(cmd_ep, &c, Duration::from_millis(500));
-        std::thread::sleep(Duration::from_millis(5));
-    }
-
     if !no_erase {
-        let sector_size = 65536u32;
-        let start_sector = byte_addr / sector_size;
-        let end_sector = (byte_addr + data.len() as u32).div_ceil(sector_size);
-        println!("  Erasing sectors {start_sector}..{end_sector}...");
-        for sector in start_sector..end_sector {
-            let sec_addr = sector * sector_size;
-            let word_addr = sec_addr / 2;
-            let erase = [
-                erase_cmd,
-                (word_addr & 0xFF) as u8,
-                ((word_addr >> 8) & 0xFF) as u8,
-                ((word_addr >> 16) & 0xFF) as u8,
-            ];
-            handle.write_bulk(cmd_ep, &erase, TIMEOUT)?;
-            std::thread::sleep(Duration::from_millis(100));
-            let _ = handle.read_bulk(data_ep, &mut [0u8; 64], Duration::from_secs(1));
+        // 64 KB sectors: erase every sector the write range touches.
+        let sector_size = 0x10000u32;
+        let first = byte_addr / sector_size;
+        let last = ((end - 1) as u32) / sector_size;
+        println!(
+            "  Erasing {} sector(s) (0x{:06X}..0x{:06X})...",
+            last - first + 1,
+            first * sector_size,
+            (last + 1) * sector_size
+        );
+        for sector in first..=last {
+            rom_erase_sector(&handle, sector * sector_size, delay)?;
         }
     }
 
+    // Publish progress through the write, then verify by reading back.
+    let total = data.chunks(64).count();
     for (i, chunk) in data.chunks(64).enumerate() {
-        let addr = byte_addr + (i * 64) as u32;
-        let word_addr = addr / 2;
-        let bank = (word_addr >> 16) as u8;
-
-        let mut cmd = vec![
-            write_cmd,
-            (word_addr & 0xFF) as u8,
-            ((word_addr >> 8) & 0xFF) as u8,
-            bank,
-        ];
-        cmd.extend_from_slice(chunk);
-        handle.write_bulk(cmd_ep, &cmd, TIMEOUT)?;
-        std::thread::sleep(delay);
-
-        let _ = handle.read_bulk(data_ep, &mut [0u8; 64], Duration::from_millis(50));
-
-        if i % 256 == 0 || i + 1 == data.len().div_ceil(64) {
+        rom_program_chunk(&handle, byte_addr + (i * 64) as u32, chunk, delay)?;
+        if i % 256 == 0 || i + 1 == total {
             println!("  Written {}/{} bytes", (i + 1) * 64, data.len());
         }
+    }
+
+    if verify {
+        println!("  Verifying...");
+        let mut mismatches = 0u64;
+        for (i, chunk) in data.chunks(64).enumerate() {
+            let addr = byte_addr + (i * 64) as u32;
+            let got = rom_read_chunk(&handle, addr, delay_ms.max(2))?;
+            if got[..chunk.len()] != chunk[..] {
+                mismatches += 1;
+                if mismatches <= 3 {
+                    let mut got64 = [0u8; 64];
+                    let n = chunk.len().min(64);
+                    got64[..n].copy_from_slice(&chunk[..n]);
+                    println!(
+                        "    mismatch at 0x{addr:06X}: cart={} file={}",
+                        hex_prefix(&got),
+                        hex_prefix(&got64)
+                    );
+                }
+            }
+        }
+        if mismatches > 0 {
+            bail!(
+                "ROM write verify FAILED: {mismatches} chunk(s) differ. Flash may not have \
+                 programmed; the board may need the erase pass, or the cartridge is not \
+                 writeable."
+            );
+        }
+        println!("  Verify OK: cartridge matches the input file.");
     }
 
     println!(
@@ -2385,6 +2424,63 @@ fn cmd_rom_write(
         data.len(),
         input.display()
     );
+    Ok(())
+}
+
+/// Issue command 0x04: write `chunk` (<=64 bytes) to cartridge ROM at `byte_addr`.
+///
+/// The firmware writes `count` bytes from the EP4 payload starting at cart
+/// address `addr`. Address and count are 16-bit; the caller keeps chunks <=64
+/// so a bank crossing never happens mid-packet.
+fn rom_program_chunk(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    chunk: &[u8],
+    delay: Duration,
+) -> Result<()> {
+    debug_assert!(chunk.len() <= 64);
+    let addr = byte_addr as u16;
+    let count = chunk.len() as u16;
+    let mut pkt = Vec::with_capacity(6 + chunk.len());
+    pkt.push(0x04u8);
+    pkt.push((addr & 0xFF) as u8);
+    pkt.push((addr >> 8) as u8);
+    pkt.push(0x00);
+    pkt.push((count & 0xFF) as u8);
+    pkt.push((count >> 8) as u8);
+    pkt.extend_from_slice(chunk);
+    handle
+        .write_bulk(CMD_EP, &pkt, TIMEOUT)
+        .with_context(|| format!("ROM write command at 0x{byte_addr:06X}"))?;
+    std::thread::sleep(delay);
+    drain_ep2(handle);
+    Ok(())
+}
+
+/// Erase one 64 KB NOR sector at `byte_addr` using the AMD/Fujitsu sequence.
+///
+/// Sequence (word mode, as emitted by the firmware):
+///   0xAA -> 0x0000, 0x55 -> 0x0505, 0x0F -> 0x0000 (erase setup),
+///   0x29 -> sector   (erase confirm)
+/// then poll the status register until the device is ready.
+fn rom_erase_sector(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    delay: Duration,
+) -> Result<()> {
+    let word = (byte_addr / 2) as u16;
+    for (cmd, addr) in [(0xAAu8, 0x0000u16), (0x55, 0x0505), (0x0F, 0x0000)] {
+        let pkt = [cmd, (addr & 0xFF) as u8, (addr >> 8) as u8, 0x00];
+        handle.write_bulk(CMD_EP, &pkt, TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(2));
+        drain_ep2(handle);
+    }
+    let confirm = [0x29u8, (word & 0xFF) as u8, (word >> 8) as u8, 0x00];
+    handle.write_bulk(CMD_EP, &confirm, TIMEOUT)?;
+    // Sector erase can take a few hundred ms; wait generously, then drain.
+    std::thread::sleep(Duration::from_millis(500));
+    drain_ep2(handle);
+    std::thread::sleep(delay);
     Ok(())
 }
 
@@ -2817,9 +2913,8 @@ fn main() -> Result<()> {
             addr,
             delay,
             no_erase,
-            write_cmd,
-            erase_cmd,
-        } => cmd_rom_write(input, addr, delay, no_erase, write_cmd, erase_cmd)?,
+            verify,
+        } => cmd_rom_write(input, addr, delay, no_erase, verify)?,
         Commands::BulkTest => cmd_bulk_test()?,
         Commands::WriteReg { addr, value } => cmd_write_reg(addr, value)?,
         Commands::ReadReg { addr } => cmd_read_reg(addr)?,

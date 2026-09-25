@@ -39,7 +39,7 @@ That is the whole setup for a normal backup. The rest of this page is detail.
 | Back up a ROM | Read ROM tab / `dump` | Yes |
 | Back up a save | Read Save tab / `save-read` | Yes |
 | Restore a save | Write Save tab / `save-write` | Be careful |
-| Write a ROM / erase | CLI only (`write-rom`, `erase`) | Experimental, can brick the cart |
+| Write a ROM (erase + write) | CLI only (`rom-write`) | Experimental, can brick the cart |
 
 Read-only tasks (everything except writing) are the safe, supported path.
 If you only want backups, you never need the risky commands.
@@ -134,7 +134,7 @@ and for the `bench` command that measures it on your unit.
 - **Back up the ROM and the save before writing anything.**
 - Use a short, good USB cable. Do not use a hub.
 - Do not unplug or interrupt a write.
-- Treat `write-rom` and `erase` as experimental — they can brick the cartridge.
+- Treat `rom-write` as experimental — it can brick the cartridge.
 
 Full checklist: [SAFETY.md](SAFETY.md).
 
