@@ -2302,11 +2302,13 @@ fn cmd_save_write(
 /// Reverse-engineered from `tusbez.bin` + `loader_table2.bin` (see
 /// `docs/firmware_re_rom_write.md`):
 ///
-/// * `CMD_ROM_WRITE` (0x04) copies the EP4 payload straight to cartridge ROM:
-///   packet `[0x04, addr_lo, addr_hi, 0, count_lo, count_hi, payload..]`.
-/// * The NOR flash uses the AMD/Fujitsu command set in word mode; erase is the
-///   `AA/55` unlock, `0x0F` erase-setup, then `0x29` confirm per sector, all
-///   issued through the ROM command channel.
+/// * Command `0x02` with suffix `0x68` is the ROM flash path:
+///   `[0x02, addr_lo, addr_hi, op, 0x68, bank]` sends one flash command byte
+///   (`op`) at `addr` and polls the CPLD until it settles.
+/// * Command `0x04` (`[0x04, addr_lo, addr_hi, payload..]`) streams the write
+///   payload to ROM, auto-incrementing the address.
+/// * The NOR flash uses the AMD/Fujitsu word-mode command set: `0x29` sector
+///   erase, `0xA0` program setup, `0x70` status/reset.
 ///
 /// This deliberately ignores the old `--write-cmd` / `--erase-cmd` guesses: the
 /// handler command and the flash command are different things.
@@ -2325,20 +2327,14 @@ fn cmd_rom_write(
     if !byte_addr.is_multiple_of(2) {
         bail!("start offset 0x{byte_addr:X} must be 16-bit aligned (word-addressed flash)");
     }
-    // Command 0x04 addresses within a single 64 KB window: the firmware's byte
-    // loop increments only the 16-bit address, and there is no bank byte in the
-    // packet. Writing across a window boundary would wrap instead of advancing,
-    // so refuse rather than silently corrupt.
-    const WINDOW: u32 = 0x10000;
     let end32 = byte_addr
         .checked_add(data.len() as u32)
         .context("ROM write range overflows 32-bit address space")?;
-    if byte_addr / WINDOW != (end32 - 1) / WINDOW {
+    if end32 > ROM_WINDOW_BYTES as u32 {
         bail!(
-            "ROM write range 0x{byte_addr:06X}..0x{end32:06X} crosses a 64 KB window. \
-             Command 0x04 addresses one window at a time and has no bank byte; write the \
-             image window by window, or extend the tool once the bank-select sequence is \
-             confirmed."
+            "ROM write range 0x{byte_addr:06X}..0x{end32:06X} exceeds the \
+             {}-byte cartridge window",
+            ROM_WINDOW_BYTES
         );
     }
 
@@ -2376,20 +2372,35 @@ fn cmd_rom_write(
             (last + 1) * sector_size
         );
         for sector in first..=last {
+            rom_bank_select(&handle, sector * sector_size, delay)?;
             rom_erase_sector(&handle, sector * sector_size, delay)?;
         }
     }
 
     // The EP4 packet is 64 bytes including the 3-byte header, so the payload
-    // per command is 61 bytes.
+    // per command is 61 bytes. Program setup (0xA0) precedes each burst, and a
+    // bank flip (0x67 + 0x5A) precedes each new 64 KB window, as the firmware's
+    // own routines do.
     const PAYLOAD: usize = 64 - 3;
+    const WINDOW: u32 = 0x10000;
     let total = data.chunks(PAYLOAD).count();
+    let mut current_window = u32::MAX;
     for (i, chunk) in data.chunks(PAYLOAD).enumerate() {
-        rom_program_chunk(&handle, byte_addr + (i * PAYLOAD) as u32, chunk, delay)?;
+        let addr = byte_addr + (i * PAYLOAD) as u32;
+        let window = addr / WINDOW;
+        if window != current_window {
+            rom_bank_select(&handle, window * WINDOW, delay)?;
+            current_window = window;
+        }
+        rom_flash_op(&handle, addr, 0xA0, delay, 2)?;
+        rom_program_chunk(&handle, addr, chunk, delay)?;
         if i % 256 == 0 || i + 1 == total {
             println!("  Written {}/{} bytes", (i + 1) * PAYLOAD, data.len());
         }
     }
+
+    // Leave the flash in read-array mode.
+    rom_flash_op(&handle, byte_addr, 0x70, delay, 20)?;
 
     if verify {
         println!("  Verifying...");
@@ -2457,28 +2468,79 @@ fn rom_program_chunk(
     Ok(())
 }
 
-/// Erase one 64 KB NOR sector at `byte_addr` using the AMD/Fujitsu sequence.
+/// Advance the write address across a 64 KB window boundary.
 ///
-/// Sequence (word mode, as emitted by the firmware):
-///   0xAA -> 0x0000, 0x55 -> 0x0505, 0x0F -> 0x0000 (erase setup),
-///   0x29 -> sector   (erase confirm)
-/// then poll the status register until the device is ready.
+/// In the firmware's bank/page engine (`0x0517`) packet byte 5 (`[0x16]`) is
+/// compared to `0x5A` at `0x05F8`; a match advances the high address by one
+/// 64 KB bank instead of programming within the current one. The address in
+/// the packet is the window start. This is the write-side equivalent of the
+/// read path's bank byte.
+fn rom_bank_select(
+    handle: &DeviceHandle<GlobalContext>,
+    window_start: u32,
+    delay: Duration,
+) -> Result<()> {
+    let addr = window_start as u16;
+    let pkt = [
+        0x02u8,
+        (addr & 0xFF) as u8,
+        (addr >> 8) as u8,
+        0x00,
+        0x67,
+        0x5A,
+    ];
+    handle
+        .write_bulk(CMD_EP, &pkt, TIMEOUT)
+        .with_context(|| format!("ROM write bank select at 0x{window_start:06X}"))?;
+    std::thread::sleep(Duration::from_millis(20));
+    drain_ep2(handle);
+    std::thread::sleep(delay);
+    Ok(())
+}
+
+/// Erase one 64 KB NOR sector at `byte_addr`.
+///
+/// The firmware's own chip-erase routine (`0x0207`, reached via command `0x02`
+/// with suffix `0x68`) issues the AMD unlock and then sends the host-supplied op
+/// byte to the flash. The sector-erase op is `0x29` with the sector address.
+/// See `docs/firmware_re_rom_write.md`.
 fn rom_erase_sector(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
     delay: Duration,
 ) -> Result<()> {
-    let word = (byte_addr / 2) as u16;
-    for (cmd, addr) in [(0xAAu8, 0x0000u16), (0x55, 0x0505), (0x0F, 0x0000)] {
-        let pkt = [cmd, (addr & 0xFF) as u8, (addr >> 8) as u8, 0x00];
-        handle.write_bulk(CMD_EP, &pkt, TIMEOUT)?;
-        std::thread::sleep(Duration::from_millis(2));
-        drain_ep2(handle);
-    }
-    let confirm = [0x29u8, (word & 0xFF) as u8, (word >> 8) as u8, 0x00];
-    handle.write_bulk(CMD_EP, &confirm, TIMEOUT)?;
-    // Sector erase can take a few hundred ms; wait generously, then drain.
-    std::thread::sleep(Duration::from_millis(500));
+    // Command 0x02, suffix 0x68 = ROM flash path; op 0x29 = erase confirm.
+    rom_flash_op(handle, byte_addr, 0x29, delay, 800)?;
+    // Return the flash to read-array mode so a following read is sane.
+    rom_flash_op(handle, byte_addr, 0x70, delay, 20)?;
+    Ok(())
+}
+
+/// Send command `0x02` on the ROM-flash path: `[0x02, addr_lo, addr_hi, op, 0x68, bank]`.
+///
+/// `op` is the flash command byte the firmware forwards to the cartridge
+/// (`0x29` erase, `0xA0` program setup, `0x70` status/reset, ...). The firmware
+/// polls the CPLD until the operation settles, so we wait `settle_ms` after.
+fn rom_flash_op(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    op: u8,
+    delay: Duration,
+    settle_ms: u64,
+) -> Result<()> {
+    let addr = byte_addr as u16;
+    let pkt = [
+        0x02u8,
+        (addr & 0xFF) as u8,
+        (addr >> 8) as u8,
+        op,
+        0x68,
+        ((byte_addr >> 16) & 0xFF) as u8,
+    ];
+    handle
+        .write_bulk(CMD_EP, &pkt, TIMEOUT)
+        .with_context(|| format!("ROM flash op 0x{op:02X} at 0x{byte_addr:06X}"))?;
+    std::thread::sleep(Duration::from_millis(settle_ms));
     drain_ep2(handle);
     std::thread::sleep(delay);
     Ok(())
