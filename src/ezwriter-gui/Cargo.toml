@@ -5,7 +5,7 @@ edition = "2024"
 description = "GUI for the EZ-Flash II / EZ-Writer II USB GBA flasher"
 
 [dependencies]
-eframe = { version = "0.31", features = ["default"] }
+eframe = { version = "0.36", features = ["default"] }
 egui = "0.31"
 rusb = { version = "0.9", features = ["vendored"] }
 anyhow = "1.0"
