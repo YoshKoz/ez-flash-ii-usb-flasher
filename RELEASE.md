@@ -38,7 +38,9 @@ Automated gates, run locally and in CI:
 - [x] CLI smoke test with no device attached: `list`, `dump`, `bench`, `save-id` all
       fail cleanly, and a failed `dump` leaves **no** file behind.
 
-Requires the physical EZ-Writer II, not yet run for this version:
+## Open items
+
+Still to confirm on the physical EZ-Writer II:
 
 - [ ] `ezwriter-cli bench` — per-chunk latency and the pipeline depth this
       hardware actually sustains (`docs/dump_performance.md` is unmeasured without it)

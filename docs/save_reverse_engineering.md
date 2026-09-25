@@ -7,7 +7,7 @@ and the `scratch/` + `tools/` reverse-engineering scripts.
 
 > **Note:** the `scratch/`, `tools/`, and root `disasm_*.py` scripts referenced
 > below have since been removed — their findings are fully absorbed into
-> `src/ezwriter-cli`'s `save-read` command. History still has them if needed.
+> `src/ezwriter-cli`'s `save-read` command.
 
 ---
 

@@ -6,6 +6,7 @@ target/
 *.ihx
 *.sav
 *.gba
+*.partial
 captures/
 original/
 original_backup/
