@@ -75,3 +75,6 @@ WinUSB must be installed via Zadig before any USB communication works. The `driv
 - `docs/original_driver_analysis.md` — Windows XP driver analysis
 - `docs/save_reverse_engineering.md` — narrative behind `save-read`; the scratch scripts it walks through were removed after their findings landed in the crates
 - `docs/dump_performance.md` — where dump time goes, the `bench` command, pipelining trade-offs, and the firmware batch-read loop whose counter every caller hardcodes to 1
+- `docs/firmware_re_rom_write.md` — ROM write/erase protocol decoded from `tusbez.bin` + loader patches
+- `docs/multi_game_format.md` — what is known about the EZ-Flash multi-game loader layout
+- `docs/rom_write_test_plan.md` — step-by-step hardware test for the write path
