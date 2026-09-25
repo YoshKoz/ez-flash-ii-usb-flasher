@@ -90,7 +90,7 @@ impl Default for EzWriterApp {
 }
 
 impl eframe::App for EzWriterApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 BgCmd::Status(s) => self.status_text = s,
@@ -151,7 +151,7 @@ impl eframe::App for EzWriterApp {
             }
         }
 
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+        egui::Panel::top("menu").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("EZ-Flash II USB Flasher");
                 ui.separator();
@@ -188,12 +188,12 @@ impl eframe::App for EzWriterApp {
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-            AppTab::Status => self.show_status(ui, ctx),
+        egui::CentralPanel::default().show(ui, |ui| match self.tab {
+            AppTab::Status => self.show_status(ui),
             AppTab::CartInfo => self.show_cart_info(ui),
-            AppTab::ReadRom => self.show_read_rom(ui, ctx),
-            AppTab::ReadSave => self.show_read_save(ui, ctx),
-            AppTab::WriteSave => self.show_write_save(ui, ctx),
+            AppTab::ReadRom => self.show_read_rom(ui),
+            AppTab::ReadSave => self.show_read_save(ui),
+            AppTab::WriteSave => self.show_write_save(ui),
         });
     }
 }
@@ -244,7 +244,7 @@ impl EzWriterApp {
         (t1.exists() && t2.exists()).then_some((t1, t2))
     }
 
-    fn show_status(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn show_status(&mut self, ui: &mut egui::Ui) {
         ui.heading("Device Status");
         ui.separator();
         ui.label(&self.status_text);
@@ -304,7 +304,8 @@ impl EzWriterApp {
                 }
             });
         }
-        ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(2));
     }
 
     fn show_cart_info(&mut self, ui: &mut egui::Ui) {
@@ -358,7 +359,7 @@ impl EzWriterApp {
         ui.label(&self.progress);
     }
 
-    fn show_read_rom(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn show_read_rom(&mut self, ui: &mut egui::Ui) {
         ui.heading("Read ROM to File");
         ui.horizontal(|ui| {
             if ui.button("[..] Select File...").clicked()
@@ -427,10 +428,10 @@ impl EzWriterApp {
         }
         ui.separator();
         ui.label(&self.progress);
-        ctx.request_repaint();
+        ui.ctx().request_repaint();
     }
 
-    fn show_read_save(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn show_read_save(&mut self, ui: &mut egui::Ui) {
         ui.heading("Read Save to File");
         if let Some(ref hdr) = self.cart_header {
             let sz = device::save_size_bytes(&hdr.save_type);
@@ -553,10 +554,10 @@ impl EzWriterApp {
         }
         ui.separator();
         ui.label(&self.progress);
-        ctx.request_repaint();
+        ui.ctx().request_repaint();
     }
 
-    fn show_write_save(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn show_write_save(&mut self, ui: &mut egui::Ui) {
         ui.heading("Write Save to Cartridge");
         ui.colored_label(
             egui::Color32::RED,
@@ -628,7 +629,8 @@ impl EzWriterApp {
         }
         ui.separator();
         ui.label(&self.progress);
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
 
