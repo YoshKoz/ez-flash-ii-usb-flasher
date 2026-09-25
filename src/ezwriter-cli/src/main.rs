@@ -2380,12 +2380,14 @@ fn cmd_rom_write(
         }
     }
 
-    // Publish progress through the write, then verify by reading back.
-    let total = data.chunks(64).count();
-    for (i, chunk) in data.chunks(64).enumerate() {
-        rom_program_chunk(&handle, byte_addr + (i * 64) as u32, chunk, delay)?;
+    // The EP4 packet is 64 bytes including the 3-byte header, so the payload
+    // per command is 61 bytes.
+    const PAYLOAD: usize = 64 - 3;
+    let total = data.chunks(PAYLOAD).count();
+    for (i, chunk) in data.chunks(PAYLOAD).enumerate() {
+        rom_program_chunk(&handle, byte_addr + (i * PAYLOAD) as u32, chunk, delay)?;
         if i % 256 == 0 || i + 1 == total {
-            println!("  Written {}/{} bytes", (i + 1) * 64, data.len());
+            println!("  Written {}/{} bytes", (i + 1) * PAYLOAD, data.len());
         }
     }
 
@@ -2429,25 +2431,23 @@ fn cmd_rom_write(
 
 /// Issue command 0x04: write `chunk` (<=64 bytes) to cartridge ROM at `byte_addr`.
 ///
-/// The firmware writes `count` bytes from the EP4 payload starting at cart
-/// address `addr`. Address and count are 16-bit; the caller keeps chunks <=64
-/// so a bank crossing never happens mid-packet.
+/// Handler `0x0A82` takes the address from packet bytes 1-2 and stages it; the
+/// byte loop at `0x068B` then copies the *whole* EP4 payload (its length is the
+/// EP4 byte count, `0x7FC9`) to the cart bus, auto-incrementing the 16-bit
+/// address per byte. So the packet is `[0x04, addr_lo, addr_hi, payload..]` —
+/// there is no separate count field.
 fn rom_program_chunk(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
     chunk: &[u8],
     delay: Duration,
 ) -> Result<()> {
-    debug_assert!(chunk.len() <= 64);
+    debug_assert!(chunk.len() <= 61); // 64-byte EP4 packet minus 3-byte header
     let addr = byte_addr as u16;
-    let count = chunk.len() as u16;
-    let mut pkt = Vec::with_capacity(6 + chunk.len());
+    let mut pkt = Vec::with_capacity(3 + chunk.len());
     pkt.push(0x04u8);
     pkt.push((addr & 0xFF) as u8);
     pkt.push((addr >> 8) as u8);
-    pkt.push(0x00);
-    pkt.push((count & 0xFF) as u8);
-    pkt.push((count >> 8) as u8);
     pkt.extend_from_slice(chunk);
     handle
         .write_bulk(CMD_EP, &pkt, TIMEOUT)

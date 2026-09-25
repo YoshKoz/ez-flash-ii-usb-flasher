@@ -59,7 +59,7 @@ calls the dispatcher at `0x15CE`, which `JMP @A+DPTR` into a table of
 | `0x01` | `0x075E` | ROM read (used by `dump`) |
 | `0x02` | `0x07B7` | read with suffix: `0x66`=FLASH, `0x68`=ROM/save-flash, `0x69`=SRAM, `0x65`=EEPROM |
 | `0x03` | `0x0A09` | save write (64-byte stream) |
-| `0x04` | `0x0A82` | **ROM/CPLD write setup** — set addr, emit `0x9F` |
+| `0x04` | `0x0A82` | **ROM/CPLD write address setup** (byte loop at `0x068B`) |
 | `0x05` | `0x0A9F` | ROM/CPLD write increment |
 | `0x06` | `0x0AB8` | ROM/CPLD write finish — emit `0x6F` |
 | `0x14` | `0x0AE1` | save type select (FLASH) |
@@ -69,12 +69,17 @@ calls the dispatcher at `0x15CE`, which `JMP @A+DPTR` into a table of
 | `0x20` | `0x0BA3` | write one byte (save bank switch) |
 | `0x21` | `0x0BDF` | read one byte (JEDEC ID) |
 
-## ROM write: command `0x04` (body at `0x068B`)
+## ROM write: command `0x04` (address setup `0x0A82`, byte loop `0x068B`)
 
-`0x04` writes a run of bytes from the EP4 payload straight to cartridge ROM:
+Command `0x04` has two halves:
+
+1. **Address setup (`0x0A82`)** — reads packet bytes 1-2 into the cartridge
+   address registers `[0x11]:[0x10]` and strobes `0x7F98 <- 0x9F`.
+2. **Byte loop (`0x068B`, entered from the EP0 handler at `0x0072`)** — copies
+   the **whole EP4 payload** to the cart bus:
 
 ```
-count = [0x7FC9]                     ; EP4 OUT byte count
+count = XRAM[0x7FC9]                 ; EP4 OUT byte count (packet length)
 for i in 0..count:
     A = XRAM[0x7DC0 + i]             ; payload byte
     cart_data(0x7F96) = A
@@ -85,8 +90,10 @@ for i in 0..count:
     advance addr
 ```
 
-So the host packet is **`[0x04, addr_lo, addr_hi, 0, count_lo, count_hi, payload...]`**,
-where the payload length matches `count`. This is the real ROM write primitive.
+So the host packet is **`[0x04, addr_lo, addr_hi, payload...]`** and the write
+length is implied by the EP4 packet length — there is **no count field**.
+Packet byte 3 onward is payload, and the address auto-increments per byte.
+The maximum payload per command is 61 bytes (64-byte EP4 packet minus header).
 
 **Limitation:** the firmware byte loop increments only the 16-bit address
 (`[0x11]`/`[0x10]`) and the packet has no bank byte, so command `0x04` addresses
