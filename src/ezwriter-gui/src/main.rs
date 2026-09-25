@@ -5,7 +5,7 @@ pub const BUILD_STAMP: &str = "0.1.0";
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([640.0, 480.0])
             .with_title(format!("EZ-Flash II USB Flasher {}", BUILD_STAMP)),
         ..Default::default()
