@@ -31,6 +31,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bulk OUT endpoint the host sends command packets to.
 const CMD_EP: u8 = 0x04;
+/// Bulk OUT endpoint used for ROM write payloads (EP2 OUT).
+const DATA_OUT_EP: u8 = 0x02;
 
 /// Embedded firmware tables (compiled in so `reload` needs no file args)
 /// Looks in CWD first, then beside the running executable.
@@ -262,6 +264,47 @@ enum Commands {
     Reload,
     /// Bulk endpoint test
     BulkTest,
+    /// Probe the ROM flash command path with an explicit packet (diagnostic)
+    ///
+    /// Sends one EP4 command `0x02` packet `[0x02, addr_lo, addr_hi, b3, b4, b5]`
+    /// and, if `--payload` is given, one EP2 OUT packet afterwards. The firmware
+    /// (see `docs/firmware_re_rom_write.md`) takes the flash operation from
+    /// packet byte 4 and the fixed bus byte from byte 3, so these probes map the
+    /// real field layout on hardware. Read-only unless the chosen op programs.
+    FlashProbe {
+        /// Bank-0 byte address for the packet
+        #[arg(default_value = "0", value_parser = parse_u32_hex)]
+        addr: u32,
+        /// Packet byte 3 (fixed bus byte, `[08]` in the firmware)
+        #[arg(long, default_value = "0", value_parser = parse_u8_hex)]
+        b3: u8,
+        /// Packet byte 4 (flash op selector, `[0A]` in the firmware)
+        #[arg(long, default_value = "0x69", value_parser = parse_u8_hex)]
+        b4: u8,
+        /// Packet byte 5 (bank/length token, `[16]` in the firmware)
+        #[arg(long, default_value = "0", value_parser = parse_u8_hex)]
+        b5: u8,
+        /// Command byte 0 of the command packet (default 0x02, the flash op).
+        #[arg(long, default_value = "0x02", value_parser = parse_u8_hex)]
+        cmd: u8,
+        /// Optional EP2 OUT payload: a hex byte string, e.g. "deadbeef"
+        #[arg(long)]
+        payload: Option<String>,
+        /// Before sending the payload, first send EP4 command `0x04` with the
+        /// same address (the firmware's ROM-write address stage, `0x0A82`).
+        #[arg(long)]
+        use_cmd04: bool,
+        /// OUT endpoint to send the payload to (default 2, the EP2 OUT FIFO that
+        /// `0x068B` and `0x1761` read from).
+        #[arg(long, default_value = "2", value_parser = parse_u8_hex)]
+        ep: u8,
+        /// OUT endpoint to send the command packet to (default 4, verified).
+        #[arg(long, default_value = "4", value_parser = parse_u8_hex)]
+        cmd_ep: u8,
+        /// Register to read back afterwards, if any
+        #[arg(long, value_parser = parse_u32_hex)]
+        read_addr: Option<u32>,
+    },
     /// Write register via cmd 0x19 (Write_Operation = 25)
     WriteReg {
         /// 24-bit address
@@ -2297,6 +2340,127 @@ fn cmd_save_write(
     Ok(())
 }
 
+/// Diagnostic: send one EP4 command `0x02` packet with explicit bytes, and
+/// optionally a follow-up EP2 OUT payload.
+///
+/// This exists because the firmware field layout for command `0x02` is not what
+/// the first implementation assumed. Handler `0x07B7` reads packet byte 1 into
+/// `[14]` (address low), byte 2 into `[13]` (address high), byte 3 into `[08]`
+/// (fixed bus byte), and byte 4 into `[0A]` (the flash-op selector), then
+/// branches on `[0A]`: `0x65` resets (`0x70`), `0x68` reads back, `0x69`
+/// programs, anything else is the `0x0904` bank/page path. Probing byte 4
+/// directly is the fastest way to confirm which value programs on real
+/// hardware.
+#[allow(clippy::too_many_arguments)]
+fn cmd_flash_probe(
+    byte_addr: u32,
+    cmd: u8,
+    b3: u8,
+    b4: u8,
+    b5: u8,
+    payload: Option<String>,
+    use_cmd04: bool,
+    ep: u8,
+    cmd_ep: u8,
+    read_addr: Option<u32>,
+) -> Result<()> {
+    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+    let handle = device.open()?;
+    let config = device.active_config_descriptor()?;
+    for iface in config.interfaces() {
+        for iface_desc in iface.descriptors() {
+            let _ = handle.claim_interface(iface_desc.interface_number());
+        }
+    }
+    for ep in 0x01u8..=0x07u8 {
+        let _ = handle.clear_halt(ep);
+        let _ = handle.clear_halt(ep | 0x80);
+    }
+
+    let addr = byte_addr as u16;
+    let pkt = [cmd, (addr & 0xFF) as u8, (addr >> 8) as u8, b3, b4, b5];
+    println!(
+        "EP{cmd_ep} cmd 0x{cmd:02X}: [{cmd:02X} {:02X} {:02X} {:02X} {:02X} {:02X}]  (addr=0x{:04X})",
+        pkt[1], pkt[2], pkt[3], pkt[4], pkt[5], addr
+    );
+    handle
+        .write_bulk(cmd_ep, &pkt, TIMEOUT)
+        .with_context(|| format!("sending EP{cmd_ep} command 0x{cmd:02X}"))?;
+    std::thread::sleep(Duration::from_millis(20));
+
+    if let Some(hex) = payload {
+        let bytes = parse_hex(&hex)?;
+        if use_cmd04 {
+            let cmd = [0x04u8, (addr & 0xFF) as u8, (addr >> 8) as u8];
+            println!(
+                "EP{cmd_ep} cmd 0x04 (address stage): [04 {:02X} {:02X}]",
+                cmd[1], cmd[2]
+            );
+            handle
+                .write_bulk(cmd_ep, &cmd, TIMEOUT)
+                .with_context(|| format!("sending EP{cmd_ep} command 0x04"))?;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        println!("EP{ep} OUT payload: {} byte(s)", bytes.len());
+        handle
+            .write_bulk(ep, &bytes, TIMEOUT)
+            .with_context(|| format!("sending EP{ep} payload"))?;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // For a read command (0x01), report what comes back on EP2 IN so the probe
+    // shows which endpoint the firmware actually services.
+    if cmd == 0x01 {
+        let mut buf = [0u8; 64];
+        match handle.read_bulk(0x82, &mut buf, Duration::from_millis(300)) {
+            Ok(n) => println!("  EP82 IN: {n} byte(s): {}", hex_prefix(&buf)),
+            Err(e) => println!("  EP82 IN: {e}"),
+        }
+    }
+
+    drain_ep2(&handle);
+
+    if let Some(a) = read_addr {
+        let got = ezusb_read_ram(&handle, a)?;
+        println!("XRAM[0x{a:04X}] = 0x{got:02X}");
+    }
+    Ok(())
+}
+
+/// Parse a decimal or `0x`-prefixed hex string (used by `flash-probe`'s clap
+/// arguments so both `0x69` and `105` work).
+fn parse_u32_hex(s: &str) -> std::result::Result<u32, String> {
+    let t = s.trim();
+    if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u32::from_str_radix(h, 16).map_err(|e| format!("invalid hex number '{s}': {e}"))
+    } else {
+        t.parse::<u32>()
+            .map_err(|e| format!("invalid number '{s}': {e}"))
+    }
+}
+
+fn parse_u8_hex(s: &str) -> std::result::Result<u8, String> {
+    parse_u32_hex(s).and_then(|v| {
+        u8::try_from(v).map_err(|_| format!("value '{s}' does not fit in a byte (0x00..0xFF)"))
+    })
+}
+
+/// Parse a decimal or `0x`-prefixed hex string into an even-length byte vector.
+fn parse_hex(s: &str) -> Result<Vec<u8>> {
+    let t = s.trim().replace([' ', '_', ','], "");
+    if !t.len().is_multiple_of(2) {
+        bail!("hex payload must have an even number of digits: {s}");
+    }
+    let mut out = Vec::with_capacity(t.len() / 2);
+    for i in (0..t.len()).step_by(2) {
+        out.push(
+            u8::from_str_radix(&t[i..i + 2], 16)
+                .with_context(|| format!("parsing hex byte at offset {i}: {s}"))?,
+        );
+    }
+    Ok(out)
+}
+
 /// ROM write/erase, implemented against the real firmware handlers.
 ///
 /// Reverse-engineered from `tusbez.bin` + `loader_table2.bin` (see
@@ -2337,6 +2501,18 @@ fn cmd_rom_write(
             ROM_WINDOW_BYTES
         );
     }
+    // Command 0x02/0x04 addresses are 16-bit. Cross-window writes rely on the
+    // 0x67/0x5A bank-flip engine, which is not yet confirmed on hardware, so
+    // refuse rather than risk writing the wrong bank. Bank-0 writes (the first
+    // 64 KB) are fully addressable and are the supported path today.
+    const WINDOW: u32 = 0x10000;
+    if byte_addr / WINDOW != (end32 - 1) / WINDOW {
+        bail!(
+            "ROM write range 0x{byte_addr:06X}..0x{end32:06X} crosses the 64 KB window \
+             boundary. Bank-0 writes are supported; cross-window writes need the unconfirmed \
+             0x67/0x5A bank flip. Write within the first 64 KB for now."
+        );
+    }
 
     let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
     let handle = device.open()?;
@@ -2361,7 +2537,8 @@ fn cmd_rom_write(
     );
 
     if !no_erase {
-        // 64 KB sectors: erase every sector the write range touches.
+        // 64 KB sectors: erase every sector the write range touches. Within the
+        // supported bank-0 path this is the single first sector.
         let sector_size = 0x10000u32;
         let first = byte_addr / sector_size;
         let last = ((end - 1) as u32) / sector_size;
@@ -2372,26 +2549,17 @@ fn cmd_rom_write(
             (last + 1) * sector_size
         );
         for sector in first..=last {
-            rom_bank_select(&handle, sector * sector_size, delay)?;
             rom_erase_sector(&handle, sector * sector_size, delay)?;
         }
     }
 
-    // The EP4 packet is 64 bytes including the 3-byte header, so the payload
-    // per command is 61 bytes. Program setup (0xA0) precedes each burst, and a
-    // bank flip (0x67 + 0x5A) precedes each new 64 KB window, as the firmware's
-    // own routines do.
-    const PAYLOAD: usize = 64 - 3;
-    const WINDOW: u32 = 0x10000;
+    // Payload per command is a full 64-byte EP2 packet (the firmware uses the EP2
+    // length, so there is no header to subtract). Program setup (0xA0) precedes
+    // each burst, as the firmware's own routines do.
+    const PAYLOAD: usize = 64;
     let total = data.chunks(PAYLOAD).count();
-    let mut current_window = u32::MAX;
     for (i, chunk) in data.chunks(PAYLOAD).enumerate() {
         let addr = byte_addr + (i * PAYLOAD) as u32;
-        let window = addr / WINDOW;
-        if window != current_window {
-            rom_bank_select(&handle, window * WINDOW, delay)?;
-            current_window = window;
-        }
         rom_flash_op(&handle, addr, 0xA0, delay, 2)?;
         rom_program_chunk(&handle, addr, chunk, delay)?;
         if i % 256 == 0 || i + 1 == total {
@@ -2440,29 +2608,44 @@ fn cmd_rom_write(
     Ok(())
 }
 
-/// Issue command 0x04: write `chunk` (<=64 bytes) to cartridge ROM at `byte_addr`.
+/// Program `chunk` (<=64 bytes) to cartridge ROM at `byte_addr`.
 ///
-/// Handler `0x0A82` takes the address from packet bytes 1-2 and stages it; the
-/// byte loop at `0x068B` then copies the *whole* EP4 payload (its length is the
-/// EP4 byte count, `0x7FC9`) to the cart bus, auto-incrementing the 16-bit
-/// address per byte. So the packet is `[0x04, addr_lo, addr_hi, payload..]` —
-/// there is no separate count field.
+/// The write is a two-endpoint sequence:
+///
+/// 1. **EP4 OUT** (`0x7CC0`): command `0x04` with `[0x04, addr_lo, addr_hi]`.
+///    ISR `0x0707` dispatches it to `0x0A82`, which stages the address into the
+///    firmware's `[0x11]:[0x10]` registers.
+/// 2. **EP2 OUT** (`0x7DC0`): the raw payload bytes. ISR `0x0046` runs the byte
+///    loop at `0x068B`, which copies the whole EP2 packet (length from the EP2
+///    OUT count `0x7FC9`) to the cart bus, auto-incrementing the 16-bit address
+///    per byte.
+///
+/// Payload max is 64 bytes (the EP2 packet is addressed by its own length, so
+/// unlike the EP4 command packet there is no header to subtract).
 fn rom_program_chunk(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
     chunk: &[u8],
     delay: Duration,
 ) -> Result<()> {
-    debug_assert!(chunk.len() <= 61); // 64-byte EP4 packet minus 3-byte header
+    debug_assert!(chunk.len() <= 64);
+    debug_assert!(
+        byte_addr < 0x10000,
+        "rom_program_chunk address must be bank-0"
+    );
     let addr = byte_addr as u16;
-    let mut pkt = Vec::with_capacity(3 + chunk.len());
-    pkt.push(0x04u8);
-    pkt.push((addr & 0xFF) as u8);
-    pkt.push((addr >> 8) as u8);
-    pkt.extend_from_slice(chunk);
+
+    // Step 1: stage the address on EP4.
+    let cmd = [0x04u8, (addr & 0xFF) as u8, (addr >> 8) as u8];
     handle
-        .write_bulk(CMD_EP, &pkt, TIMEOUT)
-        .with_context(|| format!("ROM write command at 0x{byte_addr:06X}"))?;
+        .write_bulk(CMD_EP, &cmd, TIMEOUT)
+        .with_context(|| format!("ROM write address 0x{byte_addr:06X}"))?;
+    std::thread::sleep(Duration::from_millis(5));
+
+    // Step 2: send the payload on EP2 OUT; the firmware programs it.
+    handle
+        .write_bulk(DATA_OUT_EP, chunk, TIMEOUT)
+        .with_context(|| format!("ROM write payload at 0x{byte_addr:06X}"))?;
     std::thread::sleep(delay);
     drain_ep2(handle);
     Ok(())
@@ -2472,9 +2655,10 @@ fn rom_program_chunk(
 ///
 /// In the firmware's bank/page engine (`0x0517`) packet byte 5 (`[0x16]`) is
 /// compared to `0x5A` at `0x05F8`; a match advances the high address by one
-/// 64 KB bank instead of programming within the current one. The address in
-/// the packet is the window start. This is the write-side equivalent of the
-/// read path's bank byte.
+/// 64 KB bank instead of programming within the current one. **Not yet
+/// confirmed on hardware**, so `rom-write` currently refuses cross-window
+/// ranges rather than risk writing the wrong bank.
+#[allow(dead_code)]
 fn rom_bank_select(
     handle: &DeviceHandle<GlobalContext>,
     window_start: u32,
@@ -2516,11 +2700,13 @@ fn rom_erase_sector(
     Ok(())
 }
 
-/// Send command `0x02` on the ROM-flash path: `[0x02, addr_lo, addr_hi, op, 0x68, bank]`.
+/// Send command `0x02` on the ROM-flash path: `[0x02, addr_lo, addr_hi, op, 0x68, 0]`.
 ///
 /// `op` is the flash command byte the firmware forwards to the cartridge
-/// (`0x29` erase, `0xA0` program setup, `0x70` status/reset, ...). The firmware
-/// polls the CPLD until the operation settles, so we wait `settle_ms` after.
+/// (`0x29` erase, `0xA0` program setup, `0x70` status/reset, ...). The address
+/// is 16-bit within bank 0; packet byte 5 is the bank/length token and is 0
+/// here (no bank flip). The firmware polls the CPLD until the operation
+/// settles, so we wait `settle_ms` after.
 fn rom_flash_op(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
@@ -2528,6 +2714,7 @@ fn rom_flash_op(
     delay: Duration,
     settle_ms: u64,
 ) -> Result<()> {
+    debug_assert!(byte_addr < 0x10000, "rom_flash_op address must be bank-0");
     let addr = byte_addr as u16;
     let pkt = [
         0x02u8,
@@ -2535,7 +2722,7 @@ fn rom_flash_op(
         (addr >> 8) as u8,
         op,
         0x68,
-        ((byte_addr >> 16) & 0xFF) as u8,
+        0x00,
     ];
     handle
         .write_bulk(CMD_EP, &pkt, TIMEOUT)
@@ -2978,6 +3165,20 @@ fn main() -> Result<()> {
             verify,
         } => cmd_rom_write(input, addr, delay, no_erase, verify)?,
         Commands::BulkTest => cmd_bulk_test()?,
+        Commands::FlashProbe {
+            addr,
+            b3,
+            b4,
+            b5,
+            cmd,
+            payload,
+            use_cmd04,
+            ep,
+            cmd_ep,
+            read_addr,
+        } => cmd_flash_probe(
+            addr, cmd, b3, b4, b5, payload, use_cmd04, ep, cmd_ep, read_addr,
+        )?,
         Commands::WriteReg { addr, value } => cmd_write_reg(addr, value)?,
         Commands::ReadReg { addr } => cmd_read_reg(addr)?,
     }

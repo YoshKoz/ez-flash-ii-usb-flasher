@@ -24,29 +24,38 @@ Record the first 64 bytes. Every later step compares against this.
 
 ## Step 2 — smallest possible write (no erase)
 
-Write a 64-byte known pattern to a sector that is already blank, so no erase is
-needed and a failure cannot destroy data. Use `--no-erase`:
+Write a short known pattern to a bank-0 offset that is already blank, so no
+erase is needed and a failure cannot destroy data. On the test cart the loader
+ends around `0xA5C4`, so `0xA600` is free. Use `--no-erase`:
 
 ```console
-# pattern file: 64 bytes, e.g. DE AD BE EF ... 
-ezwriter-cli rom-write pattern64.bin --addr 0x0 --no-erase --verify
+# pattern file: 61 bytes of a known sequence
+ezwriter-cli rom-write pattern.bin --addr 0xA600 --no-erase --verify
 ```
 
-Expected: verify passes, `cart-read 0 1` shows the pattern.
+Expected: verify passes, `cart-read 0xA600 1` shows the pattern.
 
-If verify fails, stop. The handler command `0x04` or the packet layout is wrong
-and the flash command bytes are not the issue.
+Bank-0 offsets only: `rom-write` refuses ranges that cross the 64 KB window
+boundary, because the write-side bank flip is not yet hardware-confirmed.
+
+If verify fails, stop. The handler command `0x04`/`0x02` or the packet layout
+is wrong and the flash command bytes are not the issue.
 
 ## Step 3 — erase one sector
 
-Only after Step 2 round-trips:
+Only after Step 2 round-trips. Sector 1 is at `0x10000`, which is outside
+bank 0 and currently refused by `rom-write`. Until the bank flip is confirmed,
+test the erase on **bank-0 sector 0** at `0xA600` — but only if you accept that
+sector being erased (it holds the loader on the test cart). Do not run this on
+a cartridge whose loader you care about.
 
 ```console
-ezwriter-cli rom-write pattern64.bin --addr 0x10000 --verify
+# DESTRUCTIVE: erases bank-0 sector 0 (0x0000..0xFFFF)
+ezwriter-cli rom-write pattern.bin --addr 0xA600 --verify
 ```
 
-This exercises the `AA/55/0F/29` erase on sector 1 before writing. Verify reads
-the sector back. Expected: 64 bytes written, rest of the sector reads `0xFF`.
+This exercises the `0x29` erase on sector 0 before writing. Verify reads the
+range back. Expected: the pattern at `0xA600`, rest of the sector `0xFF`.
 
 ## Step 4 — confirm the rest of the sector is blank
 

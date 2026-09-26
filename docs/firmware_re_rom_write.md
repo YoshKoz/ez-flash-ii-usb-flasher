@@ -201,3 +201,118 @@ read back:        cmd 0x01 [01, addr_lo, addr_hi, bank]
   and xref finders. Recovered from the pre-rewrite `disasm_v2_cmd02*.py`,
   `dis_dispatch.py`, `merge_fw_patches.py` (still retrievable from old GitHub
   commit SHAs).
+
+## Corrections after hardware probing (supersedes parts above)
+
+A run of on-hardware probes against a writeable EZ-Flash II cart corrected
+several assumptions in the section above. Everything below is **observed on
+hardware + matched to disassembly**; the earlier "confirmed by disassembly"
+claims that conflict with this section are wrong.
+
+### Endpoint roles (measured)
+
+Sending command `0x01` to each OUT endpoint and reading EP2 IN:
+
+| OUT EP | cmd `0x01` result | Role |
+|--------|-------------------|------|
+| EP1 | `Pipe error` | not an OUT channel |
+| **EP2** | accepted, no fresh data | **write-side dispatcher** (`0x0046`) |
+| EP3 | accepted, no reply | unused |
+| **EP4** | **returns cart ROM bytes** | **cart command channel** (`0x0707`) |
+| EP5 | accepted, no reply | unused |
+| EP6 | accepted, no fresh data | unused |
+| EP7 | `Pipe error` | unused |
+
+- The EP4 OUT IRQ handler is `0x0707` and reads FIFO `0x7CC0`. **EP4 is the only
+  cart command endpoint.** Reads (`0x01`) work on it; both EP2 and EP6 accept
+  writes but never drive the cart.
+- EP2's IRQ handler is `0x0046` and reads FIFO payload `0x7DC0` / count
+  `0x7FC9`. EP2 is the **write-side** dispatcher, but it is keyed on `[0x0A]`,
+  which is **set by the EP4 `0x02` handler**, not by EP2's own packet.
+
+### Command `0x02` field map (measured + disassembled)
+
+Handler `0x07B7` reads the packet as:
+
+| Packet byte | XRAM | Meaning |
+|-------------|------|---------|
+| 1 | `0x14` | address low |
+| 2 | `0x13` | address high |
+| 3 | `0x08` | fixed bus byte for the op |
+| **4** | **`0x0A`** | **flash-op / type selector** |
+| 5 | `0x16` | bank/length token |
+
+`[0x0A]` then routes: `0x65` → reset (`0x70`), `0x66` → save FLASH, `0x68` →
+ROM, `0x69` → SRAM, anything else → the `0x0904` bank/page path.
+
+### The single-byte write primitive: command `0x20`
+
+`[0x20, addr_lo, addr_hi, data]` (handler `0x0BA3`) is the **byte write** the
+working save path uses. It strobes:
+
+```
+0x7F9C <- 0xFF
+0x7F98 <- 0x9F
+0x7F96 <- data            ; packet byte 3
+0x7F98 <- 0xBF, 0x9F
+0x7F96 <- addr_lo ; 0x7F97 <- addr_hi
+0x7F98 <- 0x97, 0x96, 0x97, 0x9F
+```
+
+The `0x97`/`0x96` strobe pair is the **data-write** strobe (versus `0x9A`/`0x9B`
+for command/address writes). One byte per packet — no payload buffer involved.
+
+### The `0x68` program path (`0x009F` → `0x0130`) — real 64-byte program
+
+When `[0x0A]==0x68` **and** packet byte 3 (`[0x08]`) `>= 0x80`, the EP2 handler
+runs the full AMD/Fujitsu word-program loop, exactly 32 iterations (`[0x19]`
+0→`0x20`), i.e. **64 bytes**:
+
+```
+0x55 @ 0x05   strobe 0x9B
+0xAA @ 0x00   strobe 0x9A,0x9F
+0xAA @ 0x02   strobe 0x9B
+0x55 @ 0x00   strobe 0x9A,0x9F
+0x55 @ 0x05   strobe 0x9B
+0xA0 @ 0x00   strobe 0x9A,0x9F          ; program-setup
+[14]:[13]     strobe 0x9B                ; target word address
+per 2 payload bytes from 0x7DC0:
+  data_lo -> 0x7F96 ; data_hi -> 0x7F97 ; strobe 0x9A,0x9B
+  poll status (0x89/0x8B -> [15],[17]) until equal
+  advance [14]/[13] ; [0x19]++
+```
+
+With packet byte 3 `< 0x80` the same path instead just issues a chip-erase
+sequence at `0x0207`.
+
+**Observed:** this path does **not** wedge the firmware (device stays alive),
+but no bytes were written in testing — the payload must be exactly **64 bytes**,
+and it is still unconfirmed whether the CPLD needs a prior unlock or whether the
+address is a word address.
+
+### The `0x69` path is a dead end
+
+`[0x0A]==0x69` reaches `0x054E`, which copies the payload (`LCALL 0x1761`, 32
+words) **only when `[0x0C]:[0x0D]` is non-zero**. Nothing in the firmware ever
+writes those registers to non-zero (only `0x0572/0x0575` and `0x08FB/0x08FE`
+zero them). So `0x69` **always** falls to `0x0620` (command-issue) and then
+hangs on a CPLD status poll. **Never use `0x69`** — it wedges the 8051 and needs
+a physical replug to recover.
+
+### Recovering a wedged writer
+
+A wedged 8051 does not respond to a USB bus reset. `ezwriter-cli reload` sends a
+CPUCS reset then a Windows PnP power cycle; that drops the device off the bus and
+it re-appears in **bootloader mode** (`0547:2131`). Replug once, then `reload`
+re-uploads `tusbez.bin` and the device returns to active mode. Budget one
+physical replug per wedge.
+
+### Still unconfirmed
+
+- Whether command `0x20` alone programs ROM, or needs a prior program-setup.
+- Whether the `0x68`/`[08]>=0x80` payload address is a byte or word address.
+- Whether the CPLD requires an unlock cycle before `0x20`/`0x68` writes.
+
+`flash-probe` was added to the CLI to drive these experiments:
+`ezwriter-cli flash-probe <addr> --cmd <hex> --b3 <hex> --b4 <hex> --cmd-ep <n>
+--ep <n> --payload <hex>`.
