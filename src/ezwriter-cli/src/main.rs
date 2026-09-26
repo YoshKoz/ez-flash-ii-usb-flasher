@@ -294,6 +294,9 @@ enum Commands {
         /// same address (the firmware's ROM-write address stage, `0x0A82`).
         #[arg(long)]
         use_cmd04: bool,
+        /// Send the EP2 payload BEFORE the command packet instead of after.
+        #[arg(long)]
+        payload_first: bool,
         /// OUT endpoint to send the payload to (default 2, the EP2 OUT FIFO that
         /// `0x068B` and `0x1761` read from).
         #[arg(long, default_value = "2", value_parser = parse_u8_hex)]
@@ -301,6 +304,10 @@ enum Commands {
         /// OUT endpoint to send the command packet to (default 4, verified).
         #[arg(long, default_value = "4", value_parser = parse_u8_hex)]
         cmd_ep: u8,
+        /// Encode the packet address as a word address (`byte_addr / 2`), as
+        /// the proven read path does. Without this the raw byte address is sent.
+        #[arg(long)]
+        word_addr: bool,
         /// Register to read back afterwards, if any
         #[arg(long, value_parser = parse_u32_hex)]
         read_addr: Option<u32>,
@@ -2362,6 +2369,8 @@ fn cmd_flash_probe(
     use_cmd04: bool,
     ep: u8,
     cmd_ep: u8,
+    word_addr: bool,
+    payload_first: bool,
     read_addr: Option<u32>,
 ) -> Result<()> {
     let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
@@ -2377,35 +2386,55 @@ fn cmd_flash_probe(
         let _ = handle.clear_halt(ep | 0x80);
     }
 
-    let addr = byte_addr as u16;
+    let addr = if word_addr {
+        (byte_addr / 2) as u16
+    } else {
+        byte_addr as u16
+    };
     let pkt = [cmd, (addr & 0xFF) as u8, (addr >> 8) as u8, b3, b4, b5];
-    println!(
-        "EP{cmd_ep} cmd 0x{cmd:02X}: [{cmd:02X} {:02X} {:02X} {:02X} {:02X} {:02X}]  (addr=0x{:04X})",
-        pkt[1], pkt[2], pkt[3], pkt[4], pkt[5], addr
-    );
-    handle
-        .write_bulk(cmd_ep, &pkt, TIMEOUT)
-        .with_context(|| format!("sending EP{cmd_ep} command 0x{cmd:02X}"))?;
-    std::thread::sleep(Duration::from_millis(20));
-
-    if let Some(hex) = payload {
-        let bytes = parse_hex(&hex)?;
-        if use_cmd04 {
-            let cmd = [0x04u8, (addr & 0xFF) as u8, (addr >> 8) as u8];
-            println!(
-                "EP{cmd_ep} cmd 0x04 (address stage): [04 {:02X} {:02X}]",
-                cmd[1], cmd[2]
-            );
-            handle
-                .write_bulk(cmd_ep, &cmd, TIMEOUT)
-                .with_context(|| format!("sending EP{cmd_ep} command 0x04"))?;
-            std::thread::sleep(Duration::from_millis(2));
-        }
+    let send_cmd = || -> Result<()> {
+        println!(
+            "EP{cmd_ep} cmd 0x{cmd:02X}: [{cmd:02X} {:02X} {:02X} {:02X} {:02X} {:02X}]  (addr=0x{:04X})",
+            pkt[1], pkt[2], pkt[3], pkt[4], pkt[5], addr
+        );
+        handle
+            .write_bulk(cmd_ep, &pkt, TIMEOUT)
+            .with_context(|| format!("sending EP{cmd_ep} command 0x{cmd:02X}"))?;
+        std::thread::sleep(Duration::from_millis(20));
+        Ok(())
+    };
+    let send_payload = |bytes: &[u8]| -> Result<()> {
         println!("EP{ep} OUT payload: {} byte(s)", bytes.len());
         handle
-            .write_bulk(ep, &bytes, TIMEOUT)
+            .write_bulk(ep, bytes, TIMEOUT)
             .with_context(|| format!("sending EP{ep} payload"))?;
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(20));
+        Ok(())
+    };
+
+    if payload_first {
+        if let Some(hex) = &payload {
+            let bytes = parse_hex(hex)?;
+            send_payload(&bytes)?;
+        }
+        send_cmd()?;
+    } else {
+        send_cmd()?;
+        if let Some(hex) = &payload {
+            let bytes = parse_hex(hex)?;
+            if use_cmd04 {
+                let cmd = [0x04u8, (addr & 0xFF) as u8, (addr >> 8) as u8];
+                println!(
+                    "EP{cmd_ep} cmd 0x04 (address stage): [04 {:02X} {:02X}]",
+                    cmd[1], cmd[2]
+                );
+                handle
+                    .write_bulk(cmd_ep, &cmd, TIMEOUT)
+                    .with_context(|| format!("sending EP{cmd_ep} command 0x04"))?;
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            send_payload(&bytes)?;
+        }
     }
 
     // For a read command (0x01), report what comes back on EP2 IN so the probe
@@ -3175,9 +3204,22 @@ fn main() -> Result<()> {
             use_cmd04,
             ep,
             cmd_ep,
+            word_addr,
+            payload_first,
             read_addr,
         } => cmd_flash_probe(
-            addr, cmd, b3, b4, b5, payload, use_cmd04, ep, cmd_ep, read_addr,
+            addr,
+            cmd,
+            b3,
+            b4,
+            b5,
+            payload,
+            use_cmd04,
+            ep,
+            cmd_ep,
+            word_addr,
+            payload_first,
+            read_addr,
         )?,
         Commands::WriteReg { addr, value } => cmd_write_reg(addr, value)?,
         Commands::ReadReg { addr } => cmd_read_reg(addr)?,

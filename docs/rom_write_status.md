@@ -57,13 +57,21 @@ The two routines, both reading a 64-byte block from **EP2's FIFO `0x7DC0`**
 | same, word address (`addr/2`) | no wedge, no write |
 | `bus_byte` `0x40` / `0x81` / `0xFF` | no wedge, no write |
 | EP4 cmd `0x04` (address stage) + 64-byte EP2 payload | no wedge, no write |
+| payload sent **before** the command | no wedge, no write |
+| payload on **EP4** instead of EP2 | no wedge, no write |
+| `0x1F` reset before programming | no wedge, no write |
 | `selector 0x69` (any form) | **wedges the 8051**, needs a replug |
 | payload to EP6 | wedges |
 
+**Reads need the word address.** `0x01` with the raw byte address returns
+garbage (XRAM-looking bytes); with `byte_addr / 2` it matches the backup exactly.
+`flash-probe --word-addr` selects that. The `0x68` program path also takes a
+word address.
+
 So the command reaches the firmware and the safe path runs the flash sequence,
 but the bytes the routine reads out of `0x7DC0` are **not** the bytes sent to
-EP2. Either EP2's FIFO is not `0x7DC0`, or the payload needs a different
-preceding transaction to land there.
+EP2 (nor EP4). Either `0x7FC9`/`0x7DC0` belong to an endpoint the host is not
+addressing, or the CPLD needs a preceding unlock the firmware does not issue.
 
 ## Recovery when the 8051 wedges
 
@@ -85,6 +93,12 @@ Client writing a ROM**, which pins down the exact packet that fills `0x7DC0`:
 
 A second option is to keep reverse-engineering the EZ-Writer's CPLD/Xilinx
 XCR3128 interface, which is what maps `0x7DC0` onto an OUT endpoint.
+
+The original EZ Client binaries were searched for but the reliable mirrors are
+now gone or login-gated: `filetrip.net` (no Wayback snapshot), `ezflash.cn`
+(403), `rbenda.de` (now a parking page), `dekazeta.net` (IPS login). The EZ
+Client 3.26 also needs its XP-era kernel driver, which will not bind to WinUSB,
+so a live capture here needs an XP VM anyway.
 
 ## Tooling
 
