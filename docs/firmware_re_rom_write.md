@@ -316,3 +316,32 @@ physical replug per wedge.
 `flash-probe` was added to the CLI to drive these experiments:
 `ezwriter-cli flash-probe <addr> --cmd <hex> --b3 <hex> --b4 <hex> --cmd-ep <n>
 --ep <n> --payload <hex>`.
+
+## External references checked (2026)
+
+Searched for an existing write-protocol capture to avoid re-deriving it.
+
+- **`tbex78/ezfadvanceIII`** (GitHub) — a fully capture-derived, hardware-proven
+  toolset for the **EZ-Flash Advance III**, with a documented USB protocol:
+  a 13-byte command frame `5A A5 92 <count> <selector> 00 00 00 <count> 00 00 00 00`,
+  a `<count>`-byte data frame 750 µs later, and the **command echoed back** on
+  EP IN. Commands: `0x91` read, `0x92` flash program, `0x95` manager prime,
+  `0x96` sector erase, `0x97`/`0x98`/`0x99` startup, with read addresses encoded
+  as `byte_offset / 2`.
+- **Conclusion: this is a different generation.** The EZ2 firmware image
+  `tusbez.bin` contains **no `5A A5 92` sequence** (checked by search) and its
+  EP4 dispatch table (`0x0736`) is the older
+  `01,02,03,04,05,06,14,19,1A,1F,20,21` set. The EZ3 protocol cannot be copied
+  onto the EZ2 writer.
+- **`ez-flash/omega-kernel`** — EZ-Flash Omega kernel source; documents the NOR
+  filesystem and loader behaviour but not the EZ-Writer USB protocol.
+- **asie's wiki** — EZ-Flash GBA **cart-side** unlock sequence
+  (`0x9FE0000=0xD200`, `0x8000000=0x1500`, `0x8020000=0xD200`,
+  `0x8040000=0x1500`); the writer's CPLD presumably issues these internally.
+- **EZ Client user manual** — confirms the original workflow writes `BL.bin` (the
+  loader) first, then per-game blocks, and that an `.ezf` file is a ROM + saver.
+  No byte-level protocol is published.
+
+No public USB capture of the EZ2/EZ-Writer `rom-write` sequence was found, so the
+remaining gap (how `0x7DC0` is filled) still needs either a capture of the
+original EZ Client or further CPLD/interface RE.
