@@ -26,20 +26,20 @@ Linux, or macOS. No old Windows XP driver needed.
 
 That is the whole setup for a normal backup. The rest of this page is detail.
 
-> Just want to back up a game? In the GUI: **Status → Detect**, then
-> **Cart Info**, then use **Read ROM** and **Read Save**. Done.
+> Just want to back up a game? In the GUI: **Device → Detect**, then
+> **Show ROM Info**, then use **Read ROM** and **BAK Saver**. Done.
 
 ## What you can do
 
 | Task | Where | Safe? |
 |------|-------|-------|
-| Find the writer | Status tab / `list` | Yes |
-| Load firmware onto the writer | Status tab / `firmware-download` | Yes |
-| Read cartridge info | Cart Info tab / `cart-info` | Yes |
+| Find the writer | Device tab / `list` | Yes |
+| Load firmware onto the writer | Device tab / `firmware-download` | Yes |
+| Read cartridge info | Show ROM Info tab / `cart-info` | Yes |
 | Back up a ROM | Read ROM tab / `dump` | Yes |
-| Back up a save | Read Save tab / `save-read` | Yes |
-| Restore a save | Write Save tab / `save-write` | Be careful |
-| Write a ROM (erase + write) | CLI only (`rom-write`) | Experimental, can brick the cart |
+| Back up a save | BAK Saver tab / `save-read` | Yes |
+| Restore a save | Write Saver tab / `save-write` | Be careful |
+| Write a ROM (erase + write) | Burn tab / `rom-write` | Works, up to 64 KB at offset 0 — see [Writing a ROM](#writing-a-rom) |
 
 Read-only tasks (everything except writing) are the safe, supported path.
 If you only want backups, you never need the risky commands.
@@ -63,15 +63,16 @@ run Zadig again and bind WinUSB to the second entry too. It may be named
 
 ## The GUI
 
-Five tabs along the top, used left to right:
+Six tabs along the top, laid out like the original EZ Client:
 
 | Tab | What it does |
 |-----|--------------|
-| **Status** | Find the writer and load its firmware |
-| **Cart Info** | Show the game title, code, save type, and ROM size |
+| **Device** | Find the writer and load its firmware |
+| **Show ROM Info** | Show the game title, code, save type, and ROM size |
 | **Read ROM** | Save the cartridge ROM to a `.gba` file |
-| **Read Save** | Save the cartridge save data to a `.sav` file |
-| **Write Save** | Put a `.sav` file back onto the cartridge |
+| **Burn** | Write a `.gba` file to the cartridge (see [Writing a ROM](#writing-a-rom)) |
+| **BAK Saver** | Save the cartridge save data to a `.sav` file |
+| **Write Saver** | Put a `.sav` file back onto the cartridge |
 
 ## Command line
 
@@ -109,6 +110,30 @@ be loaded again on every new connection.
   signatures, so a broken save is not silently written.
 - `--no-confirm` and `--fast` are faster but skip the double read. Use only if
   you understand the risk.
+
+### Writing a ROM
+
+`rom-write` (and the GUI **Burn** tab) replays the USB traffic of a successful
+burn by the original 2006 EZ Client, captured with USBPcap, with your ROM data
+put in its place: unlock the flash blocks, erase, program, then lock them again.
+
+```console
+./ezwriter-cli rom-write mygame.gba 0 --verify   # write + read back and compare
+./ezwriter-cli rom-verify mygame.gba             # read-only compare, no write
+```
+
+Tested on real hardware: write, change one byte, write the original back, each
+checked with `--verify`. Current limits:
+
+- Writes start at offset 0. The CLI accepts up to 64 KB; the replay itself
+  covers 256 KB.
+- It needs the **vendor firmware** that the original driver loads. Today that
+  means: unplug and replug the writer, let a Windows 7 VM running the original
+  EZ Client load it, then power the VM off. The native `firmware-download`
+  firmware does not support writing yet.
+
+Details: [docs/rom_write_status.md](docs/rom_write_status.md) and
+[docs/session_2026-09-27_capture_and_write_findings.md](docs/session_2026-09-27_capture_and_write_findings.md).
 
 ### Speed
 

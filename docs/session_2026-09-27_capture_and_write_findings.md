@@ -221,3 +221,27 @@ payloads + `0x05`/`0x06`) is the correct fix.
 
 
 
+
+## Update (end of day): write works natively
+
+The port above still failed on hardware (EP2 payload NAK, then a wedged
+writer). The decoded sequence was incomplete:
+
+1. `ezclient_write_sequence.txt` only kept `0x01/0x02/0x04/0x05/0x06` and EP2.
+   The full burn also has **3054 `0x19` bus writes** and **256 `0x1a` status
+   reads**: EZ-Flash CPLD unlock (`D200`/`1500`), Intel flash `60`+`D0` block
+   unlock, `70` status, `50` clear, `FF` read array, erase, and `60`+`01`
+   re-lock of all 540 blocks at the end. Full stream:
+   `captures/ezclient_burn_full_stream.txt`.
+2. Correction to item 3: in `02 00 <b2> <b3> 67`, **byte 2** is the 32 KB page
+   (`00/40/80/C0`) and **byte 3** the upper step (`00/01`); `02` in byte 3 is
+   the preamble.
+3. `0x1a` replies on EP 0x84; byte0 bit7 = flash ready. They must be polled.
+
+Fix (commit `659b442`): `tools/gen_burn_script.py` -> `captures/ezclient_burn_script.txt`,
+replayed by CLI `rom_write_ez` and GUI `write_rom` with the ROM data swapped in.
+Read-back (`rom_read_ez`, `rom-verify` in `a6775be`) streams EP 0x82 after one
+`01 00 00 00`.
+
+Hardware result (VERIFIED): 64 KB write + verify passed three times (original,
+`0xF000` `FF`->`5A`, original). The cart is back on the EZLoader image.
