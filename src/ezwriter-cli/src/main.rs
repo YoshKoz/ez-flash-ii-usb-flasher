@@ -2514,7 +2514,7 @@ fn cmd_rom_write(
     input: PathBuf,
     byte_addr: u32,
     delay_ms: u64,
-    no_erase: bool,
+    _no_erase: bool,
     verify: bool,
     init: bool,
 ) -> Result<()> {
@@ -2576,39 +2576,18 @@ fn cmd_rom_write(
         rom_session_init(&handle)?;
     }
 
-    if !no_erase {
-        // 64 KB sectors: erase every sector the write range touches. Within the
-        // supported bank-0 path this is the single first sector.
-        let sector_size = 0x10000u32;
-        let first = byte_addr / sector_size;
-        let last = ((end - 1) as u32) / sector_size;
-        println!(
-            "  Erasing {} sector(s) (0x{:06X}..0x{:06X})...",
-            last - first + 1,
-            first * sector_size,
-            (last + 1) * sector_size
-        );
-        for sector in first..=last {
-            rom_erase_sector(&handle, sector * sector_size, delay)?;
-        }
+    // Captured EZClient write path (docs/captures/ezclient_write_sequence.txt):
+    //   cmd 0x05 begin -> cmd 0x02 suffix 0x67 (bank/page program) with
+    //   4096-byte EP2 OUT payloads -> cmd 0x06 end. The old 0x68/0xA0 + 64-byte
+    //   path never programmed; this is the real one.
+    if byte_addr != 0 {
+        bail!("the EZClient write path captured so far starts at 0 only");
     }
-
-    // Payload per command is a full 64-byte EP2 packet (the firmware uses the EP2
-    // length, so there is no header to subtract). Program setup (0xA0) precedes
-    // each burst, as the firmware's own routines do.
-    const PAYLOAD: usize = 64;
-    let total = data.chunks(PAYLOAD).count();
-    for (i, chunk) in data.chunks(PAYLOAD).enumerate() {
-        let addr = byte_addr + (i * PAYLOAD) as u32;
-        rom_flash_op(&handle, addr, 0xA0, delay, 2)?;
-        rom_program_chunk(&handle, addr, chunk, delay)?;
-        if i % 256 == 0 || i + 1 == total {
-            println!("  Written {}/{} bytes", (i + 1) * PAYLOAD, data.len());
+    rom_write_ez(&handle, &data, delay, |w, t| {
+        if w % (32 * 1024) == 0 || w == t {
+            println!("  Written {w}/{t} bytes");
         }
-    }
-
-    // Leave the flash in read-array mode.
-    rom_flash_op(&handle, byte_addr, 0x70, delay, 20)?;
+    })?;
 
     if verify {
         println!("  Verifying...");
@@ -2618,23 +2597,12 @@ fn cmd_rom_write(
             let got = rom_read_chunk(&handle, addr, delay_ms.max(2))?;
             if got[..chunk.len()] != chunk[..] {
                 mismatches += 1;
-                if mismatches <= 3 {
-                    let mut got64 = [0u8; 64];
-                    let n = chunk.len().min(64);
-                    got64[..n].copy_from_slice(&chunk[..n]);
-                    println!(
-                        "    mismatch at 0x{addr:06X}: cart={} file={}",
-                        hex_prefix(&got),
-                        hex_prefix(&got64)
-                    );
-                }
             }
         }
         if mismatches > 0 {
             bail!(
                 "ROM write verify FAILED: {mismatches} chunk(s) differ. Flash may not have \
-                 programmed; the board may need the erase pass, or the cartridge is not \
-                 writeable."
+                 programmed, or the cartridge is not writeable."
             );
         }
         println!("  Verify OK: cartridge matches the input file.");
@@ -2647,6 +2615,71 @@ fn cmd_rom_write(
     );
     Ok(())
 }
+
+/// Write ROM using the captured EZClient protocol.
+///
+/// Structure (from `docs/captures/ezclient_write_sequence.txt`):
+///   1. `05`                       begin
+///   2. `02 00 00 02 67`           flash op (byte3=0x02)
+///      `04 00 00`                 address stage
+///      8 x EP2 OUT 4096 (0x00)    32 KB
+///   3. for each 32 KB page: `02 00 00 <page> 67` then 8 x EP2 OUT 4096 (data)
+///      page bytes = 00,40,80,c0,01,41,81,c1,...  (captured sequence)
+///   4. `06`                       end
+fn rom_write_ez<F>(
+    handle: &DeviceHandle<GlobalContext>,
+    data: &[u8],
+    delay: Duration,
+    mut cb: F,
+) -> Result<()>
+where
+    F: FnMut(u64, u64),
+{
+    const BULK: usize = 4096;
+    const PER_PAGE: usize = 8; // 8 x 4096 = 32 KB per page command
+    const BLOCK: usize = BULK * PER_PAGE;
+    const PAGES: usize = 8; // captured sequence covers 8 pages (256 KB)
+
+    let total = (BLOCK * PAGES) as u64;
+    let mut buf = data.to_vec();
+    buf.resize(BLOCK * PAGES, 0x00); // pad the window; EZClient wrote 0x00 past the ROM
+
+    // 1. begin
+    handle.write_bulk(CMD_EP, &[0x05], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(5));
+
+    // 2. preamble: flash op + address stage + 32 KB of 0x00
+    handle.write_bulk(CMD_EP, &[0x02, 0x00, 0x00, 0x02, 0x67], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(2));
+    handle.write_bulk(CMD_EP, &[0x04, 0x00, 0x00], TIMEOUT)?;
+    for _ in 0..PER_PAGE {
+        handle.write_bulk(DATA_OUT_EP, &[0u8; BULK], TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // 3. program pages
+    const PAGE_BYTES: [u8; PAGES] = [0x00, 0x40, 0x80, 0xC0, 0x01, 0x41, 0x81, 0xC1];
+    for (page, &sel) in PAGE_BYTES.iter().enumerate() {
+        handle
+            .write_bulk(CMD_EP, &[0x02, 0x00, 0x00, sel, 0x67], TIMEOUT)
+            .with_context(|| format!("ROM page 0x{sel:02X}"))?;
+        std::thread::sleep(Duration::from_millis(2));
+        for i in 0..PER_PAGE {
+            let off = page * BLOCK + i * BULK;
+            handle
+                .write_bulk(DATA_OUT_EP, &buf[off..off + BULK], TIMEOUT)
+                .with_context(|| format!("ROM payload page {page} burst {i}"))?;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        cb(((page + 1) * BLOCK) as u64, total);
+    }
+
+    // 4. end
+    handle.write_bulk(CMD_EP, &[0x06], TIMEOUT)?;
+    std::thread::sleep(delay);
+    Ok(())
+}
+
 
 /// Program `chunk` (<=64 bytes) to cartridge ROM at `byte_addr`.
 ///
@@ -2662,6 +2695,7 @@ fn cmd_rom_write(
 ///
 /// Payload max is 64 bytes (the EP2 packet is addressed by its own length, so
 /// unlike the EP4 command packet there is no header to subtract).
+#[allow(dead_code)]
 fn rom_program_chunk(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
@@ -2729,6 +2763,7 @@ fn rom_bank_select(
 /// with suffix `0x68`) issues the AMD unlock and then sends the host-supplied op
 /// byte to the flash. The sector-erase op is `0x29` with the sector address.
 /// See `docs/firmware_re_rom_write.md`.
+#[allow(dead_code)]
 fn rom_erase_sector(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
@@ -2748,6 +2783,7 @@ fn rom_erase_sector(
 /// is 16-bit within bank 0; packet byte 5 is the bank/length token and is 0
 /// here (no bank flip). The firmware polls the CPLD until the operation
 /// settles, so we wait `settle_ms` after.
+#[allow(dead_code)]
 fn rom_flash_op(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,

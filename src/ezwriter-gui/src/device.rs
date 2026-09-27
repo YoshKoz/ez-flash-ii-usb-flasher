@@ -1317,6 +1317,7 @@ pub fn rom_session_init(handle: &DeviceHandle<GlobalContext>) -> Result<[u8; 64]
 
 /// cmd `0x02` on the ROM-flash path: `[0x02, addr_lo, addr_hi, op, 0x68, 0]`.
 /// Bank-0 only; the firmware polls the CPLD, so wait `settle_ms` afterwards.
+#[allow(dead_code)]
 fn rom_flash_op(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
@@ -1343,6 +1344,7 @@ fn rom_flash_op(
 }
 
 /// Erase one 64 KB NOR sector (`op 0x29`), then return the flash to read-array.
+#[allow(dead_code)]
 fn rom_erase_sector(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
@@ -1354,6 +1356,7 @@ fn rom_erase_sector(
 
 /// Program one <=64-byte chunk: stage the address on EP4 (`0x04`), then send the
 /// payload on EP2 OUT. The firmware copies the whole EP2 packet to the cart bus.
+#[allow(dead_code)]
 fn rom_program_chunk(
     handle: &DeviceHandle<GlobalContext>,
     byte_addr: u32,
@@ -1407,6 +1410,7 @@ pub struct RomWriteOptions {
     pub byte_addr: u32,
     /// Inter-chunk delay in ms.
     pub delay_ms: u64,
+    #[allow(dead_code)]
     pub no_erase: bool,
     pub verify: bool,
     pub init: bool,
@@ -1443,35 +1447,53 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
 
     let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
     let delay = Duration::from_millis(opts.delay_ms);
-    let total = data.len() as u64;
+    let _total = data.len() as u64;
 
     if opts.init {
         let id = rom_session_init(&handle)?;
         eprintln!("[rom-write] session init flash ID: {}", hex_prefix(&id));
     }
 
-    if !opts.no_erase {
-        rom_erase_sector(&handle, opts.byte_addr, delay)?;
-    }
+    // Captured EZClient write path (docs/captures/ezclient_write_sequence.txt):
+    //   cmd 0x05 begin -> cmd 0x02 suffix 0x67 (bank/page program) with
+    //   4096-byte EP2 payloads -> cmd 0x06 end.
+    const BULK: usize = 4096;
+    const PER_PAGE: usize = 8; // 8 x 4096 = 32 KB per page command
+    const BLOCK: usize = BULK * PER_PAGE;
+    const PAGE_BYTES: [u8; 8] = [0x00, 0x40, 0x80, 0xC0, 0x01, 0x41, 0x81, 0xC1];
+    let mut buf = data.to_vec();
+    buf.resize(BLOCK * PAGE_BYTES.len(), 0x00);
 
-    const PAYLOAD: usize = 64;
-    let chunks = data.chunks(PAYLOAD).count();
-    for (i, chunk) in data.chunks(PAYLOAD).enumerate() {
-        let addr = opts.byte_addr + (i * PAYLOAD) as u32;
-        rom_flash_op(&handle, addr, 0xA0, delay, 2)?;
-        rom_program_chunk(&handle, addr, chunk, delay)?;
-        if i % 64 == 0 || i + 1 == chunks {
-            cb(((i + 1) * PAYLOAD).min(data.len()) as u64, total);
+    handle.write_bulk(CMD_EP, &[0x05], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(5));
+    handle.write_bulk(CMD_EP, &[0x02, 0x00, 0x00, 0x02, 0x67], TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(2));
+    handle.write_bulk(CMD_EP, &[0x04, 0x00, 0x00], TIMEOUT)?;
+    for _ in 0..PER_PAGE {
+        handle.write_bulk(DATA_OUT_EP, &[0u8; BULK], TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    for (page, &sel) in PAGE_BYTES.iter().enumerate() {
+        handle
+            .write_bulk(CMD_EP, &[0x02, 0x00, 0x00, sel, 0x67], TIMEOUT)
+            .with_context(|| format!("ROM page 0x{sel:02X}"))?;
+        std::thread::sleep(Duration::from_millis(2));
+        for i in 0..PER_PAGE {
+            let off = page * BLOCK + i * BULK;
+            handle
+                .write_bulk(DATA_OUT_EP, &buf[off..off + BULK], TIMEOUT)
+                .with_context(|| format!("ROM payload page {page} burst {i}"))?;
+            std::thread::sleep(Duration::from_millis(1));
         }
+        cb(((page + 1) * BLOCK) as u64, (BLOCK * PAGE_BYTES.len()) as u64);
     }
-
-    // Leave the flash in read-array mode.
-    rom_flash_op(&handle, opts.byte_addr, 0x70, delay, 20)?;
+    handle.write_bulk(CMD_EP, &[0x06], TIMEOUT)?;
+    std::thread::sleep(delay);
 
     if opts.verify {
         let mut mismatches = 0u64;
-        for (i, chunk) in data.chunks(PAYLOAD).enumerate() {
-            let addr = opts.byte_addr + (i * PAYLOAD) as u32;
+        for (i, chunk) in data.chunks(64).enumerate() {
+            let addr = opts.byte_addr + (i * 64) as u32;
             let got = rom_read_chunk_addr(&handle, addr, opts.delay_ms.max(2))?;
             let n = chunk.len().min(64);
             if got[..n] != chunk[..n] {
