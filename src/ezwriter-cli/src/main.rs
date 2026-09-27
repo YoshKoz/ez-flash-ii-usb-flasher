@@ -2811,7 +2811,7 @@ fn reg_read(handle: &DeviceHandle<GlobalContext>, addr: u32) -> Result<[u8; 64]>
     std::thread::sleep(Duration::from_millis(10));
     let mut buf = [0u8; 64];
     handle
-        .read_bulk(0x82, &mut buf, TIMEOUT)
+        .read_bulk(0x84, &mut buf, TIMEOUT)
         .with_context(|| format!("reg read reply addr=0x{addr:06X}"))?;
     Ok(buf)
 }
