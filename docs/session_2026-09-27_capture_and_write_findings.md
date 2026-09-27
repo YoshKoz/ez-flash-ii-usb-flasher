@@ -172,4 +172,52 @@ replugging to bootloader and letting the guest's `ezwinit.sys` load it (rather
 than the CLI `init-exact` loader tables). Either may let EZClient reach its write
 path so the `0x02`/`0x04` packets can be captured and diffed.
 
+## SOLVED: captured a successful Burn — the real write protocol
+
+The blocker was the firmware: EZClient's write path only engages with the
+**vendor firmware**. After replugging to bootloader and letting the guest's
+`ezwinit.sys` load it (captured: `docs/captures/ezwinit_firmware_load_trace.txt`,
+device `0547:2131` → `0548:1005`), EZClient burned the ROM successfully (the cart
+then showed two `EZLoader` entries).
+
+Capture: `docs/captures/ezclient_successful_burn_trace.txt` (11058 frames) and the
+compact command/​payload list `docs/captures/ezclient_write_sequence.txt`.
+
+Endpoints: **EP2 OUT** = payload (4096-byte transfers), **EP4 OUT** = commands,
+**EP4 IN `0x84`** = replies.
+
+Command sequence (EP4 unless noted):
+
+```
+05                       ; begin (1 byte)
+01 00 00 00              ; read (cmd 0x01) at 0x0000
+01 00 40 00, 01 00 80 00, 01 00 c0 00, 01 00 00 01, ...   ; 16 KB steps
+02 00 00 02 67           ; flash op: byte3=0x02, byte4=0x67
+04 00 00                 ; address stage (cmd 0x04)
+EP2 OUT 4096 x 8         ; 32 KB of 0x00
+02 00 00 00 67           ; program: byte3=0x00, byte4=0x67
+EP2 OUT 4096 x 8         ; real ROM data (2e 00 00 ea 24 ff ae 51 ...)
+02 00 00 40 67           ; byte3=0x40
+EP2 OUT 4096 x 8         ; data then 0xFF padding
+02 00 00 80 67           ; byte3=0x80
+EP2 OUT 4096 x 8         ; 0x00
+...                      ; byte3 = 00,40,80,c0,01,41,81,c1,...
+06                       ; end (1 byte)
+```
+
+### Key deltas vs the current `rom-write`
+
+1. The program command is `cmd 0x02` with **byte4 = `0x67`** (the firmware's
+   bank/page engine at `0x0517`), **not** `0x68`/op `0xA0`.
+2. The payload is **4096 bytes** on EP2 OUT, **not 64**.
+3. Byte 3 (`0x00,0x40,0x80,0xC0,0x01,...`) is the **page/op selector**, not a
+   program-setup op.
+4. `cmd 0x05` begins and `cmd 0x06` ends the session.
+5. No `0x29` sector-erase or `0xA0` program-setup packet was observed.
+
+This is why every previous `rom-write` attempt wrote nothing: it used the wrong
+op path (`0x68`) and a 64-byte payload. Porting the above (`0x67` + 4 KB EP2
+payloads + `0x05`/`0x06`) is the correct fix.
+
+
 
