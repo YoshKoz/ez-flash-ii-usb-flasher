@@ -35,10 +35,21 @@ fn decode_nintendo_logo(data: &[u8]) -> Vec<[u8; 3]> {
     pixels
 }
 
+/// Parse a hex address string like `0x000000` or `000000`.
+fn parse_hex_u32(s: &str) -> Option<u32> {
+    let t = s.trim();
+    let t = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
+    u32::from_str_radix(t, 16).ok()
+}
+
 enum AppTab {
     Status,
     CartInfo,
     ReadRom,
+    WriteRom,
     ReadSave,
     WriteSave,
 }
@@ -50,6 +61,7 @@ enum BgCmd {
     DumpProgress { bytes_read: u64, total_bytes: u64 },
     SaveReadProgress { bytes_read: u64, total_bytes: u64 },
     SaveWriteProgress { bytes_read: u64, total_bytes: u64 },
+    RomWriteProgress { bytes_written: u64, total_bytes: u64 },
     Error(String),
 }
 
@@ -60,6 +72,13 @@ pub struct EzWriterApp {
     nintendo_logo: Vec<[u8; 3]>,
     rom_path: PathBuf,
     save_path: PathBuf,
+    /// Write ROM tab state.
+    write_rom_path: PathBuf,
+    write_rom_addr: String,
+    write_rom_delay_ms: u64,
+    write_rom_no_erase: bool,
+    write_rom_verify: bool,
+    write_rom_init: bool,
     progress: String,
     progress_value: f32,
     /// Read every ROM chunk twice and require agreement. Catches the stale-EP2
@@ -80,6 +99,12 @@ impl Default for EzWriterApp {
             nintendo_logo: Vec::new(),
             rom_path: PathBuf::new(),
             save_path: PathBuf::new(),
+            write_rom_path: PathBuf::new(),
+            write_rom_addr: "0x000000".into(),
+            write_rom_delay_ms: 50,
+            write_rom_no_erase: false,
+            write_rom_verify: true,
+            write_rom_init: true,
             progress: String::new(),
             progress_value: 0.0,
             confirm_chunks: true,
@@ -143,6 +168,19 @@ impl eframe::App for EzWriterApp {
                         total_bytes as f64 / 1024.0
                     );
                 }
+                BgCmd::RomWriteProgress {
+                    bytes_written,
+                    total_bytes,
+                } => {
+                    let pct = bytes_written as f64 / total_bytes as f64;
+                    self.progress_value = pct as f32;
+                    self.progress = format!(
+                        "Writing ROM: {:.0}% ({:.1} / {:.1} KB)",
+                        pct * 100.0,
+                        bytes_written as f64 / 1024.0,
+                        total_bytes as f64 / 1024.0
+                    );
+                }
                 BgCmd::Error(e) => {
                     self.progress = format!("Error: {e}");
                     self.cart_header = None;
@@ -153,16 +191,16 @@ impl eframe::App for EzWriterApp {
 
         egui::Panel::top("menu").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("EZ-Flash II USB Flasher");
+                ui.heading("EZ Client");
                 ui.separator();
                 if ui
-                    .selectable_label(matches!(self.tab, AppTab::Status), "Status")
+                    .selectable_label(matches!(self.tab, AppTab::Status), "Device")
                     .clicked()
                 {
                     self.tab = AppTab::Status;
                 }
                 if ui
-                    .selectable_label(matches!(self.tab, AppTab::CartInfo), "Cart Info")
+                    .selectable_label(matches!(self.tab, AppTab::CartInfo), "Show ROM Info")
                     .clicked()
                 {
                     self.tab = AppTab::CartInfo;
@@ -174,26 +212,65 @@ impl eframe::App for EzWriterApp {
                     self.tab = AppTab::ReadRom;
                 }
                 if ui
-                    .selectable_label(matches!(self.tab, AppTab::ReadSave), "Read Save")
+                    .selectable_label(matches!(self.tab, AppTab::WriteRom), "Burn")
+                    .clicked()
+                {
+                    self.tab = AppTab::WriteRom;
+                }
+                if ui
+                    .selectable_label(matches!(self.tab, AppTab::ReadSave), "BAK Saver")
                     .clicked()
                 {
                     self.tab = AppTab::ReadSave;
                 }
                 if ui
-                    .selectable_label(matches!(self.tab, AppTab::WriteSave), "Write Save")
+                    .selectable_label(matches!(self.tab, AppTab::WriteSave), "Write Saver")
                     .clicked()
                 {
                     self.tab = AppTab::WriteSave;
                 }
+                ui.separator();
+                if ui.button("Refresh List").clicked() {
+                    self.progress.clear();
+                    self.detect(self.tx.clone());
+                }
             });
         });
 
-        egui::CentralPanel::default().show(ui, |ui| match self.tab {
-            AppTab::Status => self.show_status(ui),
-            AppTab::CartInfo => self.show_cart_info(ui),
-            AppTab::ReadRom => self.show_read_rom(ui),
-            AppTab::ReadSave => self.show_read_save(ui),
-            AppTab::WriteSave => self.show_write_save(ui),
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(200.0, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.heading("ROM Lists");
+                        ui.separator();
+                        match &self.cart_header {
+                            Some(hdr) => {
+                                ui.label(format!("C  {}", hdr.title));
+                                if !hdr.code.is_empty() {
+                                    ui.label(format!("     [{}]", hdr.code));
+                                }
+                                ui.label(format!("     {}", hdr.save_type));
+                            }
+                            None => {
+                                ui.label("C  (no cart)");
+                            }
+                        }
+                        ui.separator();
+                        ui.label("Tip: Refresh List after plugging in.");
+                    },
+                );
+                ui.separator();
+                ui.vertical(|ui| match self.tab {
+                    AppTab::Status => self.show_status(ui),
+                    AppTab::CartInfo => self.show_cart_info(ui),
+                    AppTab::ReadRom => self.show_read_rom(ui),
+                    AppTab::WriteRom => self.show_write_rom(ui),
+                    AppTab::ReadSave => self.show_read_save(ui),
+                    AppTab::WriteSave => self.show_write_save(ui),
+                });
+            });
         });
     }
 }
@@ -429,6 +506,118 @@ impl EzWriterApp {
         ui.separator();
         ui.label(&self.progress);
         ui.ctx().request_repaint();
+    }
+
+    fn show_write_rom(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Write ROM to Cartridge (Burn)");
+        ui.colored_label(
+            egui::Color32::RED,
+            "[!]  DESTRUCTIVE — this ERASES and rewrites cartridge flash. Back it up first.",
+        );
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            if ui.button("[..] Select ROM File...").clicked()
+                && let Some(path) = FileDialog::new()
+                    .set_title("Open GBA ROM")
+                    .add_filter("GBA ROM", &["gba", "bin"])
+                    .add_filter("All Files", &["*"])
+                    .pick_file()
+            {
+                self.write_rom_path = path;
+            }
+            ui.label(self.write_rom_path.display().to_string());
+        });
+
+        if !self.write_rom_path.as_os_str().is_empty() {
+            let size = std::fs::metadata(&self.write_rom_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            ui.label(format!("File size: {size} bytes ({} KB)", size / 1024));
+            if size > 0x10000 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 170, 0),
+                    "(!) Only the first 64 KB (bank 0) can be written today; a larger file \
+                     will be refused rather than risk the wrong bank.",
+                );
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Start address:");
+            ui.add(egui::TextEdit::singleline(&mut self.write_rom_addr).desired_width(110.0));
+            ui.label("Inter-chunk delay (ms):");
+            ui.add(egui::DragValue::new(&mut self.write_rom_delay_ms).range(0..=1000));
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.write_rom_init,
+                "Run CPLD/bank init first (EZClient sequence)",
+            );
+            ui.checkbox(
+                &mut self.write_rom_no_erase,
+                "Skip erase (only if the region is already blank)",
+            );
+            ui.checkbox(&mut self.write_rom_verify, "Verify after writing");
+        });
+        ui.separator();
+
+        let addr = parse_hex_u32(&self.write_rom_addr);
+        if self.write_rom_path.as_os_str().is_empty() {
+            ui.label("Select a ROM file to enable writing.");
+        } else if addr.is_none() {
+            ui.colored_label(egui::Color32::RED, "Start address must be hex, e.g. 0x000000.");
+        } else if ui.button("[w] ERASE + WRITE ROM").clicked() {
+            let path = self.write_rom_path.clone();
+            let opts = device::RomWriteOptions {
+                byte_addr: addr.unwrap(),
+                delay_ms: self.write_rom_delay_ms,
+                no_erase: self.write_rom_no_erase,
+                verify: self.write_rom_verify,
+                init: self.write_rom_init,
+            };
+            let tx = self.tx.clone();
+            self.progress_value = 0.01;
+            thread::spawn(move || {
+                let data = match std::fs::read(&path) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = tx.send(BgCmd::Error(e.to_string()));
+                        return;
+                    }
+                };
+                let total = data.len() as u64;
+                match device::write_rom(&data, &opts, |written, tot| {
+                    let _ = tx.send(BgCmd::RomWriteProgress {
+                        bytes_written: written,
+                        total_bytes: tot,
+                    });
+                }) {
+                    Ok(msg) => {
+                        let _ = tx.send(BgCmd::RomWriteProgress {
+                            bytes_written: total,
+                            total_bytes: total,
+                        });
+                        let _ = tx.send(BgCmd::Progress(msg));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BgCmd::Error(e.to_string()));
+                    }
+                }
+            });
+        }
+
+        if self.progress_value > 0.0 {
+            ui.add(
+                egui::ProgressBar::new(self.progress_value)
+                    .show_percentage()
+                    .animate(true),
+            );
+        }
+        ui.separator();
+        ui.label(&self.progress);
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(300));
     }
 
     fn show_read_save(&mut self, ui: &mut egui::Ui) {

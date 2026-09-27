@@ -1234,6 +1234,265 @@ pub fn write_save(data: &[u8], save_type: &str, cb: impl Fn(u64, u64)) -> Result
     Ok(format!("Wrote {} bytes to cartridge save", data.len()))
 }
 
+// ---------------------------------------------------------------------------
+// ROM write
+// ---------------------------------------------------------------------------
+
+/// Payload OUT endpoint the firmware's program loop reads from (`0x7DC0`).
+const DATA_OUT_EP: u8 = 0x02;
+
+/// Drain stale EP2 IN packets so the next read cannot return a leftover buffer.
+fn drain_ep2(handle: &DeviceHandle<GlobalContext>) {
+    let mut buf = [0u8; 64];
+    for _ in 0..64 {
+        if handle
+            .read_bulk(DATA_EP, &mut buf, Duration::from_millis(40))
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+/// cmd `0x19`: `[0x19, addr_lo, addr_mid, addr_hi, val_lo, val_hi]` on EP4.
+fn rom_reg_write(handle: &DeviceHandle<GlobalContext>, addr: u32, val: u16) -> Result<()> {
+    let cmd = [
+        0x19u8,
+        (addr & 0xFF) as u8,
+        ((addr >> 8) & 0xFF) as u8,
+        ((addr >> 16) & 0xFF) as u8,
+        (val & 0xFF) as u8,
+        (val >> 8) as u8,
+    ];
+    handle
+        .write_bulk(CMD_EP, &cmd, TIMEOUT)
+        .with_context(|| format!("reg write addr=0x{addr:06X} val=0x{val:04X}"))?;
+    Ok(())
+}
+
+/// cmd `0x1A`: `[0x1A, addr_lo, addr_mid, addr_hi]` on EP4. The reply arrives on
+/// EP `0x84` (not `0x82`, which returns a stale buffer) — confirmed against the
+/// real EZClient with a host USB capture.
+fn rom_reg_read(handle: &DeviceHandle<GlobalContext>, addr: u32) -> Result<[u8; 64]> {
+    let cmd = [
+        0x1Au8,
+        (addr & 0xFF) as u8,
+        ((addr >> 8) & 0xFF) as u8,
+        ((addr >> 16) & 0xFF) as u8,
+    ];
+    handle
+        .write_bulk(CMD_EP, &cmd, TIMEOUT)
+        .with_context(|| format!("reg read addr=0x{addr:06X}"))?;
+    std::thread::sleep(Duration::from_millis(10));
+    let mut buf = [0u8; 64];
+    handle
+        .read_bulk(0x84, &mut buf, TIMEOUT)
+        .with_context(|| format!("reg read reply addr=0x{addr:06X}"))?;
+    Ok(buf)
+}
+
+/// Replay the client's CPLD/bank-register init sequence and read the flash ID.
+/// Register values decoded from `EZClient.exe`; matches the CLI `session-init`.
+pub fn rom_session_init(handle: &DeviceHandle<GlobalContext>) -> Result<[u8; 64]> {
+    const SEQ: &[(u32, u16)] = &[
+        (0xFF0000, 0xD2FF),
+        (0x000000, 0x15FF),
+        (0x010000, 0xD2FF),
+        (0x020000, 0x15FF),
+        (0xA00000, 0x667A),
+        (0xFE0000, 0x15FF),
+        (0xFF0000, 0xD2FF),
+        (0x000000, 0x15FF),
+        (0x010000, 0xD2FF),
+        (0x020000, 0x15FF),
+        (0xE20000, 0x51FF),
+        (0xFE0000, 0x15FF),
+    ];
+    for &(addr, val) in SEQ {
+        rom_reg_write(handle, addr, val)?;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    rom_reg_read(handle, 0x000064)
+}
+
+/// cmd `0x02` on the ROM-flash path: `[0x02, addr_lo, addr_hi, op, 0x68, 0]`.
+/// Bank-0 only; the firmware polls the CPLD, so wait `settle_ms` afterwards.
+fn rom_flash_op(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    op: u8,
+    delay: Duration,
+    settle_ms: u64,
+) -> Result<()> {
+    let addr = (byte_addr / 2) as u16;
+    let pkt = [
+        0x02u8,
+        (addr & 0xFF) as u8,
+        (addr >> 8) as u8,
+        op,
+        0x68,
+        0x00,
+    ];
+    handle
+        .write_bulk(CMD_EP, &pkt, TIMEOUT)
+        .with_context(|| format!("ROM flash op 0x{op:02X} at 0x{byte_addr:06X}"))?;
+    std::thread::sleep(Duration::from_millis(settle_ms));
+    drain_ep2(handle);
+    std::thread::sleep(delay);
+    Ok(())
+}
+
+/// Erase one 64 KB NOR sector (`op 0x29`), then return the flash to read-array.
+fn rom_erase_sector(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    delay: Duration,
+) -> Result<()> {
+    rom_flash_op(handle, byte_addr, 0x29, delay, 800)?;
+    rom_flash_op(handle, byte_addr, 0x70, delay, 20)
+}
+
+/// Program one <=64-byte chunk: stage the address on EP4 (`0x04`), then send the
+/// payload on EP2 OUT. The firmware copies the whole EP2 packet to the cart bus.
+fn rom_program_chunk(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    chunk: &[u8],
+    delay: Duration,
+) -> Result<()> {
+    debug_assert!(chunk.len() <= 64);
+    let addr = (byte_addr / 2) as u16;
+    let cmd = [0x04u8, (addr & 0xFF) as u8, (addr >> 8) as u8];
+    handle
+        .write_bulk(CMD_EP, &cmd, TIMEOUT)
+        .with_context(|| format!("ROM write address 0x{byte_addr:06X}"))?;
+    std::thread::sleep(Duration::from_millis(5));
+    handle
+        .write_bulk(DATA_OUT_EP, chunk, TIMEOUT)
+        .with_context(|| format!("ROM write payload at 0x{byte_addr:06X}"))?;
+    std::thread::sleep(delay);
+    drain_ep2(handle);
+    Ok(())
+}
+
+/// Read one 64-byte ROM chunk with an open handle (used by write verification).
+fn rom_read_chunk_addr(
+    handle: &DeviceHandle<GlobalContext>,
+    byte_addr: u32,
+    delay_ms: u64,
+) -> Result<[u8; 64]> {
+    let word_addr = byte_addr / 2;
+    let addr_16 = (word_addr & 0xFFFF) as u16;
+    let bank = (word_addr >> 16) as u8;
+    let cmd = [
+        0x01u8,
+        (addr_16 & 0xFF) as u8,
+        ((addr_16 >> 8) & 0xFF) as u8,
+        bank,
+    ];
+    handle.write_bulk(CMD_EP, &cmd, TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(delay_ms.max(2)));
+    let mut buf = [0u8; 64];
+    let len = handle.read_bulk(DATA_EP, &mut buf, TIMEOUT)?;
+    if len != 64 {
+        bail!("short verify read at 0x{byte_addr:06X}: {len} bytes");
+    }
+    Ok(buf)
+}
+
+/// Options for a ROM write.
+#[derive(Clone, Copy)]
+pub struct RomWriteOptions {
+    /// Start byte address (16-bit aligned; bank-0 only today).
+    pub byte_addr: u32,
+    /// Inter-chunk delay in ms.
+    pub delay_ms: u64,
+    pub no_erase: bool,
+    pub verify: bool,
+    pub init: bool,
+}
+
+/// Write `data` to the cartridge ROM. Same algorithm as the CLI `rom-write`:
+/// optional CPLD init, 64 KB sector erase, then `0xA0` program-setup plus a
+/// 64-byte payload per chunk, and a `0x70` read-array reset at the end.
+///
+/// Only bank-0 (first 64 KB) writes are supported; cross-window ranges need the
+/// unconfirmed `0x67/0x5A` bank-flip and are refused rather than risk the wrong
+/// bank.
+pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> Result<String> {
+    if data.is_empty() {
+        bail!("refusing to write an empty file");
+    }
+    if !opts.byte_addr.is_multiple_of(2) {
+        bail!("start offset 0x{:X} must be 16-bit aligned", opts.byte_addr);
+    }
+    let end = opts
+        .byte_addr
+        .checked_add(data.len() as u32)
+        .context("ROM write range overflows 32-bit address space")?;
+    const WINDOW: u32 = 0x10000;
+    if opts.byte_addr / WINDOW != (end - 1) / WINDOW {
+        bail!(
+            "ROM write range 0x{:06X}..0x{:06X} crosses the 64 KB window boundary. \
+             Bank-0 writes are supported; cross-window writes need the unconfirmed \
+             0x67/0x5A bank flip.",
+            opts.byte_addr,
+            end
+        );
+    }
+
+    let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+    let delay = Duration::from_millis(opts.delay_ms);
+    let total = data.len() as u64;
+
+    if opts.init {
+        let id = rom_session_init(&handle)?;
+        eprintln!("[rom-write] session init flash ID: {}", hex_prefix(&id));
+    }
+
+    if !opts.no_erase {
+        rom_erase_sector(&handle, opts.byte_addr, delay)?;
+    }
+
+    const PAYLOAD: usize = 64;
+    let chunks = data.chunks(PAYLOAD).count();
+    for (i, chunk) in data.chunks(PAYLOAD).enumerate() {
+        let addr = opts.byte_addr + (i * PAYLOAD) as u32;
+        rom_flash_op(&handle, addr, 0xA0, delay, 2)?;
+        rom_program_chunk(&handle, addr, chunk, delay)?;
+        if i % 64 == 0 || i + 1 == chunks {
+            cb(((i + 1) * PAYLOAD).min(data.len()) as u64, total);
+        }
+    }
+
+    // Leave the flash in read-array mode.
+    rom_flash_op(&handle, opts.byte_addr, 0x70, delay, 20)?;
+
+    if opts.verify {
+        let mut mismatches = 0u64;
+        for (i, chunk) in data.chunks(PAYLOAD).enumerate() {
+            let addr = opts.byte_addr + (i * PAYLOAD) as u32;
+            let got = rom_read_chunk_addr(&handle, addr, opts.delay_ms.max(2))?;
+            let n = chunk.len().min(64);
+            if got[..n] != chunk[..n] {
+                mismatches += 1;
+            }
+        }
+        if mismatches > 0 {
+            bail!(
+                "ROM write verify FAILED: {mismatches} chunk(s) differ. Flash may not have \
+                 programmed, or the cartridge is not writeable."
+            );
+        }
+    }
+
+    Ok(format!(
+        "ROM write complete: {} bytes at 0x{:06X}",
+        data.len(),
+        opts.byte_addr
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
