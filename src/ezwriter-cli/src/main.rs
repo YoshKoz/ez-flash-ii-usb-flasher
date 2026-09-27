@@ -2648,6 +2648,18 @@ where
     handle.write_bulk(CMD_EP, &[0x05], TIMEOUT)?;
     std::thread::sleep(Duration::from_millis(5));
 
+    // EZClient runs a short read pass between begin and the flash op; replicate
+    // it (captured as 01 00 00 00 / 01 00 40 00 / ... / 01 00 c0 01).
+    for &b2 in &[0x00u8, 0x40, 0x80, 0xC0] {
+        for &b3 in &[0x00u8, 0x01] {
+            let mut buf = [0u8; 64];
+            handle.write_bulk(CMD_EP, &[0x01, 0x00, b2, b3], TIMEOUT)?;
+            std::thread::sleep(Duration::from_millis(2));
+            let _ = handle.read_bulk(0x82, &mut buf, Duration::from_millis(200));
+        }
+    }
+    std::thread::sleep(Duration::from_millis(50));
+
     // 2. preamble: flash op + address stage + 32 KB of 0x00
     handle.write_bulk(CMD_EP, &[0x02, 0x00, 0x00, 0x02, 0x67], TIMEOUT)?;
     std::thread::sleep(Duration::from_millis(2));
