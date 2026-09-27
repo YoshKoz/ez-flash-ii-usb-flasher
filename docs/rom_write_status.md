@@ -1,8 +1,32 @@
 # ROM Write: Where It Stands
 
-Short version: the EZ2 writer's **write** path is not cracked yet. This file
-records exactly what is proven, what was tried, and what the next step must be,
-so the work does not have to be re-derived.
+## Status 2026-09-27: ROM write works natively (vendor firmware)
+
+- **VERIFIED**: `ezwriter-cli rom-write <file> 0 --verify` wrote and verified a
+  64 KB image three times in a row (original, one byte `FF`->`5A` at `0xF000`,
+  original again). The `FF` -> `5A` -> `FF` flip needs an erase, so erase and
+  program both work. Each write takes about 5.5 s.
+- **Root cause of the earlier EP2 NAK**: `captures/ezclient_write_sequence.txt`
+  dropped the 3054 `0x19` bus writes and 256 `0x1a` status reads. Those carry
+  the EZ-Flash CPLD unlock (`D200`/`1500` magic), the Intel flash commands
+  (`60`+`D0` block unlock, `70` status, `50` clear, `FF` read array, `60`+`01`
+  re-lock) and the ready polls (`0x1a` -> EP 0x84, byte0 bit7 = ready).
+- **Method**: `tools/gen_burn_script.py` turns
+  `captures/ezclient_successful_burn_trace.txt` into
+  `captures/ezclient_burn_script.txt`. The CLI (`rom_write_ez`) and GUI
+  (`write_rom`) replay it with the ROM data swapped into the EP2 payloads.
+  Status reads are polled until ready, not replayed a fixed number of times.
+- **Read-back** (`rom_read_ez`): `05`, 24-command unlock/read-array prefix,
+  `01 00 00 00`, then one contiguous stream on EP 0x82, then `06`. After a `01`
+  the firmware streams EP 0x82 without stopping. Issuing `01` again per 32 KB
+  page corrupted the start of page 1, so drain once and read in one run.
+- **Limits**: offset 0 only, at most 256 KB (the captured 8 x 32 KB window);
+  the window past the ROM is written as `0x00`, like EZClient does. Larger
+  ROMs need the unlock/erase ranges generalised beyond the captured script.
+- Requires the vendor firmware (replug -> boot VM -> power off VM). The CLI's
+  `cart-read`/`read-reg` time out on that firmware.
+
+The sections below are the older investigation log.
 
 ## What works (do not re-investigate)
 

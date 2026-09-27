@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use rusb::{Device, DeviceDescriptor, DeviceHandle, GlobalContext};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const BOOTLOADER_VID: u16 = 0x0547;
 pub const BOOTLOADER_PID: u16 = 0x2131;
@@ -1378,31 +1378,6 @@ fn rom_program_chunk(
     Ok(())
 }
 
-/// Read one 64-byte ROM chunk with an open handle (used by write verification).
-fn rom_read_chunk_addr(
-    handle: &DeviceHandle<GlobalContext>,
-    byte_addr: u32,
-    delay_ms: u64,
-) -> Result<[u8; 64]> {
-    let word_addr = byte_addr / 2;
-    let addr_16 = (word_addr & 0xFFFF) as u16;
-    let bank = (word_addr >> 16) as u8;
-    let cmd = [
-        0x01u8,
-        (addr_16 & 0xFF) as u8,
-        ((addr_16 >> 8) & 0xFF) as u8,
-        bank,
-    ];
-    handle.write_bulk(CMD_EP, &cmd, TIMEOUT)?;
-    std::thread::sleep(Duration::from_millis(delay_ms.max(2)));
-    let mut buf = [0u8; 64];
-    let len = handle.read_bulk(DATA_EP, &mut buf, TIMEOUT)?;
-    if len != 64 {
-        bail!("short verify read at 0x{byte_addr:06X}: {len} bytes");
-    }
-    Ok(buf)
-}
-
 /// Options for a ROM write.
 #[derive(Clone, Copy)]
 pub struct RomWriteOptions {
@@ -1416,103 +1391,150 @@ pub struct RomWriteOptions {
     pub init: bool,
 }
 
-/// Write `data` to the cartridge ROM. Same algorithm as the CLI `rom-write`:
-/// optional CPLD init, 64 KB sector erase, then `0xA0` program-setup plus a
-/// 64-byte payload per chunk, and a `0x70` read-array reset at the end.
-///
-/// Only bank-0 (first 64 KB) writes are supported; cross-window ranges need the
-/// unconfirmed `0x67/0x5A` bank-flip and are refused rather than risk the wrong
-/// bank.
+/// Captured EZClient Burn, replayed with the ROM data substituted (see
+/// `tools/gen_burn_script.py`); same as the CLI `rom-write`.
+const BURN_SCRIPT: &str = include_str!("../../../docs/captures/ezclient_burn_script.txt");
+const BURN_WINDOW: usize = 8 * 32 * 1024;
+
+fn unhex(s: &str) -> Result<Vec<u8>> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).with_context(|| format!("bad hex: {s}")))
+        .collect()
+}
+
+/// Write `data` to the start of the cartridge ROM by replaying EZClient's Burn:
+/// unlock, erase, program 8 x 32 KB pages via EP2, re-lock.
 pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> Result<String> {
+    const BULK: usize = 4096;
+    const PREAMBLE: usize = 8;
+
     if data.is_empty() {
         bail!("refusing to write an empty file");
     }
-    if !opts.byte_addr.is_multiple_of(2) {
-        bail!("start offset 0x{:X} must be 16-bit aligned", opts.byte_addr);
+    if opts.byte_addr != 0 {
+        bail!("the captured EZClient write path starts at offset 0 only");
     }
-    let end = opts
-        .byte_addr
-        .checked_add(data.len() as u32)
-        .context("ROM write range overflows 32-bit address space")?;
-    const WINDOW: u32 = 0x10000;
-    if opts.byte_addr / WINDOW != (end - 1) / WINDOW {
+    if data.len() > BURN_WINDOW {
         bail!(
-            "ROM write range 0x{:06X}..0x{:06X} crosses the 64 KB window boundary. \
-             Bank-0 writes are supported; cross-window writes need the unconfirmed \
-             0x67/0x5A bank flip.",
-            opts.byte_addr,
-            end
+            "ROM is {} bytes; the captured burn covers {BURN_WINDOW} bytes only",
+            data.len()
         );
     }
 
     let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
     let delay = Duration::from_millis(opts.delay_ms);
-    let _total = data.len() as u64;
 
     if opts.init {
         let id = rom_session_init(&handle)?;
         eprintln!("[rom-write] session init flash ID: {}", hex_prefix(&id));
     }
 
-    // Captured EZClient write path (docs/captures/ezclient_write_sequence.txt):
-    //   cmd 0x05 begin -> cmd 0x02 suffix 0x67 (bank/page program) with
-    //   4096-byte EP2 payloads -> cmd 0x06 end.
-    const BULK: usize = 4096;
-    const PER_PAGE: usize = 8; // 8 x 4096 = 32 KB per page command
-    const BLOCK: usize = BULK * PER_PAGE;
-    const PAGE_BYTES: [u8; 8] = [0x00, 0x40, 0x80, 0xC0, 0x01, 0x41, 0x81, 0xC1];
     let mut buf = data.to_vec();
-    buf.resize(BLOCK * PAGE_BYTES.len(), 0x00);
+    buf.resize(BURN_WINDOW, 0x00); // EZClient wrote 0x00 past the ROM
+    let total = BURN_WINDOW as u64;
 
-    handle.write_bulk(CMD_EP, &[0x05], TIMEOUT)?;
-    std::thread::sleep(Duration::from_millis(5));
-    handle.write_bulk(CMD_EP, &[0x02, 0x00, 0x00, 0x02, 0x67], TIMEOUT)?;
-    std::thread::sleep(Duration::from_millis(2));
-    handle.write_bulk(CMD_EP, &[0x04, 0x00, 0x00], TIMEOUT)?;
-    for _ in 0..PER_PAGE {
-        handle.write_bulk(DATA_OUT_EP, &[0u8; BULK], TIMEOUT)?;
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    for (page, &sel) in PAGE_BYTES.iter().enumerate() {
-        handle
-            .write_bulk(CMD_EP, &[0x02, 0x00, 0x00, sel, 0x67], TIMEOUT)
-            .with_context(|| format!("ROM page 0x{sel:02X}"))?;
-        std::thread::sleep(Duration::from_millis(2));
-        for i in 0..PER_PAGE {
-            let off = page * BLOCK + i * BULK;
-            handle
-                .write_bulk(DATA_OUT_EP, &buf[off..off + BULK], TIMEOUT)
-                .with_context(|| format!("ROM payload page {page} burst {i}"))?;
-            std::thread::sleep(Duration::from_millis(1));
+    let mut ep2 = 0usize;
+    let mut inbuf = vec![0u8; BULK];
+    for (n, line) in BURN_SCRIPT.lines().enumerate() {
+        let (op, arg) = line.split_once(' ').unwrap_or((line, ""));
+        let ctx = || format!("burn script line {}: {line}", n + 1);
+        match op {
+            "C" => {
+                handle.write_bulk(CMD_EP, &unhex(arg)?, TIMEOUT).with_context(ctx)?;
+            }
+            "P" => {
+                let cmd = unhex(arg)?;
+                let deadline = Instant::now() + Duration::from_secs(20);
+                loop {
+                    handle.write_bulk(CMD_EP, &cmd, TIMEOUT).with_context(ctx)?;
+                    let got = handle.read_bulk(0x84, &mut inbuf[..64], TIMEOUT).with_context(ctx)?;
+                    if got > 0 && inbuf[0] & 0x80 != 0 {
+                        break;
+                    }
+                    if Instant::now() > deadline {
+                        bail!("flash never reported ready ({})", ctx());
+                    }
+                }
+            }
+            "O" => {
+                let payload = if ep2 < PREAMBLE {
+                    &[0u8; BULK][..]
+                } else {
+                    let off = (ep2 - PREAMBLE) * BULK;
+                    &buf[off..off + BULK]
+                };
+                handle.write_bulk(DATA_OUT_EP, payload, TIMEOUT).with_context(ctx)?;
+                ep2 += 1;
+                if ep2 > PREAMBLE && (ep2 - PREAMBLE) % 8 == 0 {
+                    cb(((ep2 - PREAMBLE) * BULK) as u64, total);
+                }
+            }
+            "R" => {
+                let mut it = arg.split(' ');
+                let ep = u8::from_str_radix(it.next().unwrap_or("").trim_start_matches("0x"), 16)?;
+                let len: usize = it.next().unwrap_or("").parse()?;
+                handle.read_bulk(ep, &mut inbuf[..len], TIMEOUT).with_context(ctx)?;
+            }
+            _ => bail!("bad burn script op ({})", ctx()),
         }
-        cb(((page + 1) * BLOCK) as u64, (BLOCK * PAGE_BYTES.len()) as u64);
     }
-    handle.write_bulk(CMD_EP, &[0x06], TIMEOUT)?;
     std::thread::sleep(delay);
 
     if opts.verify {
-        let mut mismatches = 0u64;
-        for (i, chunk) in data.chunks(64).enumerate() {
-            let addr = opts.byte_addr + (i * 64) as u32;
-            let got = rom_read_chunk_addr(&handle, addr, opts.delay_ms.max(2))?;
-            let n = chunk.len().min(64);
-            if got[..n] != chunk[..n] {
-                mismatches += 1;
-            }
-        }
-        if mismatches > 0 {
+        let got = rom_read_ez(&handle, data.len())?;
+        if let Some(off) = (0..data.len()).find(|&i| got[i] != data[i]) {
+            let bad = (0..data.len()).filter(|&i| got[i] != data[i]).count();
             bail!(
-                "ROM write verify FAILED: {mismatches} chunk(s) differ. Flash may not have \
-                 programmed, or the cartridge is not writeable."
+                "ROM write verify FAILED: {bad} byte(s) differ, first at 0x{off:06X}                  (got {:02X}, want {:02X}).",
+                got[off],
+                data[off]
             );
         }
     }
 
-    Ok(format!(
-        "ROM write complete: {} bytes at 0x{:06X}",
-        data.len(),
-        opts.byte_addr
-    ))
+    Ok(format!("ROM write complete: {} bytes at 0x000000", data.len()))
+}
+
+/// Read the start of the ROM the way EZClient reads back after a Burn:
+/// `05`, CPLD unlock + read-array (the captured prefix), `01 00 00 00`, a
+/// sequential stream on EP 0x82, then `06`.
+fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u8>> {
+    const PREFIX: [&str; 24] = [
+        "190000ffffd2", "19000000ff15", "19000001ffd2", "19000002ff15", "190000c40000",
+        "190000feff15", "190000ffffd2", "19000000ff15", "19000001ffd2", "19000002ff15",
+        "190000e2ff15", "190000feff15", "19000000ff00", "19010000ff00", "19020000ff00",
+        "19030000ff00", "190000c0ff00", "190100c0ff00", "190200c0ff00", "190300c0ff00",
+        "19000041ff00", "19010041ff00", "19020041ff00", "19030041ff00",
+    ];
+    if len > BURN_WINDOW {
+        bail!("read-back covers {BURN_WINDOW} bytes only");
+    }
+
+    handle.write_bulk(CMD_EP, &[0x05], TIMEOUT)?;
+    for cmd in PREFIX {
+        handle.write_bulk(CMD_EP, &unhex(cmd)?, TIMEOUT)?;
+    }
+    // After `01` the firmware streams EP 0x82 sequentially and never stops, so
+    // drain whatever an earlier stream left, then read one contiguous run.
+    let mut stale = [0u8; 4096];
+    for _ in 0..16 {
+        if handle.read_bulk(0x82, &mut stale, Duration::from_millis(50)).is_err() {
+            break;
+        }
+    }
+    handle.write_bulk(CMD_EP, &[0x01, 0x00, 0x00, 0x00], TIMEOUT)?;
+    let mut out = vec![0u8; len.div_ceil(4096) * 4096];
+    let mut got = 0;
+    while got < out.len() {
+        let end = got + 4096;
+        got += handle
+            .read_bulk(0x82, &mut out[got..end], TIMEOUT)
+            .with_context(|| format!("read-back at 0x{got:06X}"))?;
+    }
+    handle.write_bulk(CMD_EP, &[0x06], TIMEOUT)?;
+    out.truncate(len);
+    Ok(out)
 }
 
 #[cfg(test)]
