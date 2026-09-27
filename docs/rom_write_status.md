@@ -1,5 +1,49 @@
 # ROM Write: Where It Stands
 
+## Status 2026-09-27 (later): 256 KB was never verified past 128 KB
+
+`rom-write` now generalises the captured burn beyond 256 KB. The capture splits
+into three parts:
+
+1. a **prologue** that unlocks every flash block on the cartridge,
+2. one **256 KB body** that clears status, erases and programs 8 x 32 KB pages,
+3. an **epilogue** that re-locks every block.
+
+The prologue and epilogue sweep all 540 block registers (135 addresses, each
+written in 4 consecutive low-byte variants), so they do not depend on the ROM
+size. Only the body carries erase and page addresses. `build_burn_script` in
+`src/ezwriter-cli/src/main.rs` therefore replays the captured body once per
+256 KB block, adding `block * 0x20000` to the `C 19` bus writes inside block 0's
+register window and `block * 0x40000` bytes to the `C 02 ... 67` page commands.
+Unit tests gate block 0 against the capture byte for byte.
+
+**Hardware correction.** The earlier "at most 256 KB" limit below was never
+tested above 64 KB. Writing the stored 256 KB image
+(`captured_burn_256k.bin`) programmed all 262144 bytes, but the read-back
+matched only `0x000000..0x01FFFF`. The first difference is at exactly
+`0x020000` — where the page command's byte 3 (`addr >> 17`) first increments
+from 0 to 1 — with 61572 of the upper 131072 bytes wrong. So byte 3 is not yet
+understood as a plain address extension, and the second half of a body pass is
+not landing where the read-back expects it. Whether the write or the read-back
+is at fault is not yet resolved: the read path issues a single `01` and streams
+EP 0x82 contiguously, and that stream has only ever been checked to 64 KB.
+
+The writer then stopped answering. `rom-verify` began failing with
+`Access is denied. (os error 5)` on open, then `Operation timed out` on the
+read, and `reload` could not bring the device back to bootloader (`Power cycled
+OK`, then `Device did not enter bootloader mode`). The device still enumerates
+as `0548:1005` on WinUSB but no longer responds. This is the documented wedge; a
+physical replug recovers it.
+
+**Next step.** With a fresh device, dump the read-back after a 256 KB write
+(`rom-verify` now saves `<input>.readback.bin` on mismatch) and establish
+whether pages 4-7 of a body pass land at `0x20000..0x3FFFF` or alias onto
+`0x00000..0x1FFFF`. That decides whether the fix is in the page command or in
+the contiguous read-back, and only after that is generalisation past 256 KB
+worth relying on.
+
+The sections below are the older investigation log.
+
 ## Status 2026-09-27: ROM write works natively (vendor firmware)
 
 - **VERIFIED**: `ezwriter-cli rom-write <file> 0 --verify` wrote and verified a
