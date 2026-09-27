@@ -1541,6 +1541,24 @@ fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u
 mod tests {
     use super::*;
 
+    /// Hardware: writes `EZW_TEST_ROM` to the cart and verifies it.
+    /// `cargo test -p ezwriter-gui -- --ignored write_rom_hardware`
+    #[test]
+    #[ignore]
+    fn write_rom_hardware() {
+        let path = std::env::var("EZW_TEST_ROM").expect("set EZW_TEST_ROM");
+        let data = std::fs::read(path).unwrap();
+        let opts = RomWriteOptions {
+            byte_addr: 0,
+            delay_ms: 50,
+            no_erase: false,
+            verify: true,
+            init: false,
+        };
+        let msg = write_rom(&data, &opts, |w, t| eprintln!("{w}/{t}")).unwrap();
+        eprintln!("{msg}");
+    }
+
     #[test]
     fn lookup_game_found() {
         let e = lookup_game("BPRE").unwrap();
