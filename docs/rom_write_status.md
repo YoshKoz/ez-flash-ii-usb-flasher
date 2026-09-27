@@ -238,3 +238,64 @@ so a live capture here needs an XP VM anyway.
 - `ez-flash/omega-kernel`, asie's wiki (cart-side unlock), EZ Client manual
   (`BL.bin` loader first, then game blocks; `.ezf` = ROM + saver).
 - No public EZ2 `rom-write` USB capture was found.
+
+## 2026-09-27 (session 2): USB capture working, read path fixed, EP 0x84
+
+This session got a USB capture of the real EZClient running against the writer
+(inside the Win7 VirtualBox VM) and fixed a read-path bug it exposed.
+
+### Capture method (Phase 1) — solved
+
+- `VBoxManage controlvm <vm> usbattach <uuid> --capturefile=...` is **broken in
+  VirtualBox 7.2.20** ("Wrong number of arguments"); do not use it.
+- Working method: **host-side USBPcap** on the root hub the writer sits on
+  (`\\.\USBPcap2` on this machine), with descriptor injection:
+  `USBPcapCMD.exe -d \\.\USBPcap2 -o cap.pcap -A --inject-descriptors`
+  then `tshark -r cap.pcap -Y "usb.idVendor==0x0548" -T fields ...`.
+- `dumpcap -D` does **not** list USBPcap interfaces here, but `USBPcapCMD.exe`
+  works directly against `\\.\USBPcapN`.
+- This captures the writer's URBs **even while the VM owns the device**
+  (VBoxUSBMon forwards through the host USB stack).
+
+### EZClient startup capture (1910 frames)
+
+- All commands go OUT on EP `0x04`: `0x19` write-register (728×) and `0x1A`
+  read-register (112×).
+- The `0x19` sequence matches `rom_session_init` in `main.rs` byte-for-byte.
+- **Every IN reply arrived on EP `0x84`; there were zero bulk INs on `0x82`.**
+- EZClient does **not** read the ROM at startup (the cart list it displays is
+  cached); a real ROM-read/write capture still needs a click in its UI.
+
+### Bug fixed: `reg_read` read the wrong IN endpoint
+
+- `reg_read` read replies from `0x82` (a stale buffer). The client reads them
+  from **`0x84`**.
+- Fix (one line in `src/ezwriter-cli/src/main.rs`): `read_bulk(0x82, …)` →
+  `read_bulk(0x84, …)` in `reg_read`.
+- Verified: `session-init` flash-ID changed from the constant stale
+  `2e 00 20 00 20 00 20 00 …` to real, address-dependent JEDEC data matching the
+  client's response body (`… 9d 38 88 42 c0 c7 b2 5f …`).
+
+### Root cause of the "aliased" / `92 00` reads: stale 8051 firmware state
+
+- Native `cart-read` first returned aliased data (`2e 00 20 00 20 00 20 00 …`),
+  then a fixed-position corruption (`92 00` at bytes 2–3 and 10–11 of every 16).
+- After a physical replug the writer is bootloader `0547:2131`.
+  `firmware-download tusbez.bin` leaves it in bootloader, and its automatic
+  "OS power cycle" **wedges the 8051** (`VID_0000&PID_0002`, "Device Descriptor
+  Request Failed"). Only a physical replug clears that.
+- **Correct re-init: `ezwriter-cli init-exact loader_table1.bin loader_table2.bin`**
+  → device returns to active mode `0548:1005`.
+- After `init-exact` + `reset-cart`, reads are clean:
+  `2e 00 00 ea 24 ff ae 51 69 9a a2 21 3d 84 82 0a` (valid entry point +
+  Nintendo logo), `0xA0` = `EZLoader`, `cart-info` prints `Title: EZLoader`.
+- So the aliasing was a half-initialised firmware, **not** the read command or
+  the address scheme.
+
+### Still open
+
+- `rom-write` is still unverified on hardware; the remaining step is a capture of
+  EZClient performing an actual ROM read and write (needs a UI click, and the
+  write erases/writes the cart).
+- EZClient showed "No Cart" while the firmware was stale; behaviour after a clean
+  `init-exact` has not been re-checked in the VM yet.
