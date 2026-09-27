@@ -120,3 +120,29 @@ Local scratch (`C:\Users\yoshi\AppData\Local\Temp\opencode\`):
    nothing).
 3. Confirm whether the program payload address is byte or word addressed.
 4. Confirm whether a CPLD unlock must precede the program.
+
+## EZClient "Burn" capture attempt (no write issued)
+
+Captured (host USBPcap2) a full EZClient session while clicking Burn.
+Trace: `docs/captures/ezclient_burn_click_trace.txt` (4330 frames, ~30 s).
+
+- EP4 command histogram: `0x19` ×1858, `0x1A` ×152, `0x05` ×1.
+  **No `0x02`, `0x03` or `0x04`** — no flash/ROM write command was sent.
+- So Burn was a no-op: EZClient never entered its write path. The ROM list
+  showed only `C EZ2 256M` (no child ROM entries), so there was nothing to
+  burn. An `Open ROM` of a hand-made 64 KB `test.gba` printed "Add rom" in the
+  Output list but did not add a burnable entry — likely the header is not a
+  valid GBA ROM (only the 8-byte logo prefix was set, not the full 156-byte
+  Nintendo logo / checksum), and/or the cart's multi-game directory no longer
+  enumerates after the earlier experimental reads.
+
+### To actually capture the write
+
+1. Stage a **valid** GBA ROM (full 156-byte Nintendo logo + correct header
+   checksum) in the guest, load it with Open ROM, select it, then Burn.
+2. Or get EZClient to enumerate the cart's existing ROMs again (the list was
+   non-empty on the first-ever run: `EZLoader`, `Pokemon Shiny Gold`) and Burn
+   one of those.
+
+Until a burn actually starts, there is no write packet to capture.
+
