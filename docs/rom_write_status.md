@@ -160,6 +160,47 @@ was a real bug (now fixed) but not *the* bug. Do not re-try this exact
 combination (word-addr + EP2 + 0xA0 unlock, with or without `--init`) as if
 it were untested — it now is.
 
+## JEDEC ID-detection replication, still unresponsive (2026-09-27)
+
+Traced `EZClient.exe`'s cart-profile detector (`sub_414860`) back to its input
+source, `sub_423830` — a JEDEC-style manufacturer/device ID probe: writes
+`0xF0`/`0x90` (reset/autoselect) at various addresses via cmd `0x19`, reads
+back via cmd `0x1A`, and branches on the result to pick a cart-profile class
+and its vtable (which is what ultimately decides the CPLD unlock sequence
+used for writes — see the `sub_421910` finding above).
+
+Replicated the probe reads/writes directly against hardware:
+- `read-reg 0`, `read-reg 0x1000`, `read-reg 0x802000`, `read-reg 0x803000`:
+  `0x8782`, `0xFFFF`, `0x8782`, `0xFFFF` — addr 0 and 0x802000 mirror exactly,
+  suggesting a 0x800000-aliased address space (useful, unexplained detail).
+- Sent the client's `0xFF`/`0x90` autoselect-unlock write sequence
+  (`write-reg 0 0xFF`, `write-reg 1 0xFF`, `write-reg 0 0x90`), then
+  re-read addr 0/2: **identical to before the unlock** (`0x8782`/`0xFFFF`).
+  No wedge, but also no observable effect from the unlock at all.
+
+This is the same pattern as every other test this session: the firmware
+accepts every command packet we send and never errors, but nothing we send
+ever changes cart-side state in an observable way (register reads are
+static, ROM writes don't land, JEDEC unlock doesn't budge the ID readout).
+That consistency points at something upstream of any specific command
+sequence — most likely a CPLD chip-select/enable step that's simply never
+being asserted by anything we've sent, rather than a wrong unlock recipe.
+
+Also confirmed: the vtable-based per-chunk write bracket used
+by the real client's save/ROM-write functions (`sub_41BB80`, `sub_41ADD0`) —
+open (vtable+0x3C), page-select (vtable+0x44, passing a computed page
+number), close (vtable+0x3C again), *then* the cmd `0x04` write — was never
+replicated in our Rust code. Static tracing could not pin down which
+concrete cart-profile vtable (and thus which CPLD sequence) matches our
+physical cart without live confirmation, and further progress needs to see
+real register state changing in response to a command, which we have not
+observed for anything yet.
+
+**Static RE is exhausted for now.** Every remaining unknown needs to see
+actual register/flash state respond to something, which requires either the
+XP-VM USB capture (see top of this file) or discovering why register writes
+have no observable effect on this specific cartridge/writer pairing.
+
 ## Next step (recommended)
 
 The firmware says the payload lives at `0x7DC0`, but no host-side test has put
