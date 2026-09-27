@@ -1441,14 +1441,18 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
         let ctx = || format!("burn script line {}: {line}", n + 1);
         match op {
             "C" => {
-                handle.write_bulk(CMD_EP, &unhex(arg)?, TIMEOUT).with_context(ctx)?;
+                handle
+                    .write_bulk(CMD_EP, &unhex(arg)?, TIMEOUT)
+                    .with_context(ctx)?;
             }
             "P" => {
                 let cmd = unhex(arg)?;
                 let deadline = Instant::now() + Duration::from_secs(20);
                 loop {
                     handle.write_bulk(CMD_EP, &cmd, TIMEOUT).with_context(ctx)?;
-                    let got = handle.read_bulk(0x84, &mut inbuf[..64], TIMEOUT).with_context(ctx)?;
+                    let got = handle
+                        .read_bulk(0x84, &mut inbuf[..64], TIMEOUT)
+                        .with_context(ctx)?;
                     if got > 0 && inbuf[0] & 0x80 != 0 {
                         break;
                     }
@@ -1464,9 +1468,11 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
                     let off = (ep2 - PREAMBLE) * BULK;
                     &buf[off..off + BULK]
                 };
-                handle.write_bulk(DATA_OUT_EP, payload, TIMEOUT).with_context(ctx)?;
+                handle
+                    .write_bulk(DATA_OUT_EP, payload, TIMEOUT)
+                    .with_context(ctx)?;
                 ep2 += 1;
-                if ep2 > PREAMBLE && (ep2 - PREAMBLE) % 8 == 0 {
+                if ep2 > PREAMBLE && (ep2 - PREAMBLE).is_multiple_of(8) {
                     cb(((ep2 - PREAMBLE) * BULK) as u64, total);
                 }
             }
@@ -1474,7 +1480,9 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
                 let mut it = arg.split(' ');
                 let ep = u8::from_str_radix(it.next().unwrap_or("").trim_start_matches("0x"), 16)?;
                 let len: usize = it.next().unwrap_or("").parse()?;
-                handle.read_bulk(ep, &mut inbuf[..len], TIMEOUT).with_context(ctx)?;
+                handle
+                    .read_bulk(ep, &mut inbuf[..len], TIMEOUT)
+                    .with_context(ctx)?;
             }
             _ => bail!("bad burn script op ({})", ctx()),
         }
@@ -1493,7 +1501,10 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
         }
     }
 
-    Ok(format!("ROM write complete: {} bytes at 0x000000", data.len()))
+    Ok(format!(
+        "ROM write complete: {} bytes at 0x000000",
+        data.len()
+    ))
 }
 
 /// Read the start of the ROM the way EZClient reads back after a Burn:
@@ -1501,11 +1512,30 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
 /// sequential stream on EP 0x82, then `06`.
 fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u8>> {
     const PREFIX: [&str; 24] = [
-        "190000ffffd2", "19000000ff15", "19000001ffd2", "19000002ff15", "190000c40000",
-        "190000feff15", "190000ffffd2", "19000000ff15", "19000001ffd2", "19000002ff15",
-        "190000e2ff15", "190000feff15", "19000000ff00", "19010000ff00", "19020000ff00",
-        "19030000ff00", "190000c0ff00", "190100c0ff00", "190200c0ff00", "190300c0ff00",
-        "19000041ff00", "19010041ff00", "19020041ff00", "19030041ff00",
+        "190000ffffd2",
+        "19000000ff15",
+        "19000001ffd2",
+        "19000002ff15",
+        "190000c40000",
+        "190000feff15",
+        "190000ffffd2",
+        "19000000ff15",
+        "19000001ffd2",
+        "19000002ff15",
+        "190000e2ff15",
+        "190000feff15",
+        "19000000ff00",
+        "19010000ff00",
+        "19020000ff00",
+        "19030000ff00",
+        "190000c0ff00",
+        "190100c0ff00",
+        "190200c0ff00",
+        "190300c0ff00",
+        "19000041ff00",
+        "19010041ff00",
+        "19020041ff00",
+        "19030041ff00",
     ];
     if len > BURN_WINDOW {
         bail!("read-back covers {BURN_WINDOW} bytes only");
@@ -1519,7 +1549,10 @@ fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u
     // drain whatever an earlier stream left, then read one contiguous run.
     let mut stale = [0u8; 4096];
     for _ in 0..16 {
-        if handle.read_bulk(0x82, &mut stale, Duration::from_millis(50)).is_err() {
+        if handle
+            .read_bulk(0x82, &mut stale, Duration::from_millis(50))
+            .is_err()
+        {
             break;
         }
     }

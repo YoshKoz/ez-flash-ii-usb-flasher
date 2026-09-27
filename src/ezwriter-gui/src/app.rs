@@ -58,10 +58,22 @@ enum BgCmd {
     Status(String),
     Header(Box<Option<device::CartHeader>>),
     Progress(String),
-    DumpProgress { bytes_read: u64, total_bytes: u64 },
-    SaveReadProgress { bytes_read: u64, total_bytes: u64 },
-    SaveWriteProgress { bytes_read: u64, total_bytes: u64 },
-    RomWriteProgress { bytes_written: u64, total_bytes: u64 },
+    DumpProgress {
+        bytes_read: u64,
+        total_bytes: u64,
+    },
+    SaveReadProgress {
+        bytes_read: u64,
+        total_bytes: u64,
+    },
+    SaveWriteProgress {
+        bytes_read: u64,
+        total_bytes: u64,
+    },
+    RomWriteProgress {
+        bytes_written: u64,
+        total_bytes: u64,
+    },
     Error(String),
 }
 
@@ -566,7 +578,10 @@ impl EzWriterApp {
         if self.write_rom_path.as_os_str().is_empty() {
             ui.label("Select a ROM file to enable writing.");
         } else if addr.is_none() {
-            ui.colored_label(egui::Color32::RED, "Start address must be hex, e.g. 0x000000.");
+            ui.colored_label(
+                egui::Color32::RED,
+                "Start address must be hex, e.g. 0x000000.",
+            );
         } else if ui.button("[w] ERASE + WRITE ROM").clicked() {
             let path = self.write_rom_path.clone();
             let opts = device::RomWriteOptions {

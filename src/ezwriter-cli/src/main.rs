@@ -2630,9 +2630,17 @@ fn cmd_rom_verify(input: PathBuf) -> Result<()> {
     let bad = (0..data.len()).filter(|&i| got[i] != data[i]).count();
     if bad > 0 {
         let off = (0..data.len()).find(|&i| got[i] != data[i]).unwrap_or(0);
-        bail!("{bad} byte(s) differ, first at 0x{off:06X} (got {:02X}, want {:02X})", got[off], data[off]);
+        bail!(
+            "{bad} byte(s) differ, first at 0x{off:06X} (got {:02X}, want {:02X})",
+            got[off],
+            data[off]
+        );
     }
-    println!("Verify OK: first {} bytes of the cart match {}", data.len(), input.display());
+    println!(
+        "Verify OK: first {} bytes of the cart match {}",
+        data.len(),
+        input.display()
+    );
     Ok(())
 }
 
@@ -2671,14 +2679,18 @@ where
         let ctx = || format!("burn script line {}: {line}", n + 1);
         match op {
             "C" => {
-                handle.write_bulk(CMD_EP, &parse_hex(arg)?, TIMEOUT).with_context(ctx)?;
+                handle
+                    .write_bulk(CMD_EP, &parse_hex(arg)?, TIMEOUT)
+                    .with_context(ctx)?;
             }
             "P" => {
                 let cmd = parse_hex(arg)?;
                 let deadline = Instant::now() + Duration::from_secs(20);
                 loop {
                     handle.write_bulk(CMD_EP, &cmd, TIMEOUT).with_context(ctx)?;
-                    let got = handle.read_bulk(0x84, &mut inbuf[..64], TIMEOUT).with_context(ctx)?;
+                    let got = handle
+                        .read_bulk(0x84, &mut inbuf[..64], TIMEOUT)
+                        .with_context(ctx)?;
                     if got > 0 && inbuf[0] & 0x80 != 0 {
                         break;
                     }
@@ -2694,9 +2706,11 @@ where
                     let off = (ep2 - PREAMBLE) * BULK;
                     &buf[off..off + BULK]
                 };
-                handle.write_bulk(DATA_OUT_EP, payload, TIMEOUT).with_context(ctx)?;
+                handle
+                    .write_bulk(DATA_OUT_EP, payload, TIMEOUT)
+                    .with_context(ctx)?;
                 ep2 += 1;
-                if ep2 > PREAMBLE && (ep2 - PREAMBLE) % 8 == 0 {
+                if ep2 > PREAMBLE && (ep2 - PREAMBLE).is_multiple_of(8) {
                     cb(((ep2 - PREAMBLE) * BULK) as u64, total);
                 }
             }
@@ -2704,7 +2718,9 @@ where
                 let mut it = arg.split(' ');
                 let ep = u8::from_str_radix(it.next().unwrap_or("").trim_start_matches("0x"), 16)?;
                 let len: usize = it.next().unwrap_or("").parse()?;
-                handle.read_bulk(ep, &mut inbuf[..len], TIMEOUT).with_context(ctx)?;
+                handle
+                    .read_bulk(ep, &mut inbuf[..len], TIMEOUT)
+                    .with_context(ctx)?;
             }
             _ => bail!("bad burn script op ({})", ctx()),
         }
@@ -2718,11 +2734,30 @@ where
 /// sequential stream on EP 0x82, then `06`.
 fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u8>> {
     const PREFIX: [&str; 24] = [
-        "190000ffffd2", "19000000ff15", "19000001ffd2", "19000002ff15", "190000c40000",
-        "190000feff15", "190000ffffd2", "19000000ff15", "19000001ffd2", "19000002ff15",
-        "190000e2ff15", "190000feff15", "19000000ff00", "19010000ff00", "19020000ff00",
-        "19030000ff00", "190000c0ff00", "190100c0ff00", "190200c0ff00", "190300c0ff00",
-        "19000041ff00", "19010041ff00", "19020041ff00", "19030041ff00",
+        "190000ffffd2",
+        "19000000ff15",
+        "19000001ffd2",
+        "19000002ff15",
+        "190000c40000",
+        "190000feff15",
+        "190000ffffd2",
+        "19000000ff15",
+        "19000001ffd2",
+        "19000002ff15",
+        "190000e2ff15",
+        "190000feff15",
+        "19000000ff00",
+        "19010000ff00",
+        "19020000ff00",
+        "19030000ff00",
+        "190000c0ff00",
+        "190100c0ff00",
+        "190200c0ff00",
+        "190300c0ff00",
+        "19000041ff00",
+        "19010041ff00",
+        "19020041ff00",
+        "19030041ff00",
     ];
     const MAX: usize = 8 * 32 * 1024;
     if len > MAX {
@@ -2737,7 +2772,10 @@ fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u
     // drain whatever an earlier stream left, then read one contiguous run.
     let mut stale = [0u8; 4096];
     for _ in 0..16 {
-        if handle.read_bulk(0x82, &mut stale, Duration::from_millis(50)).is_err() {
+        if handle
+            .read_bulk(0x82, &mut stale, Duration::from_millis(50))
+            .is_err()
+        {
             break;
         }
     }
