@@ -146,3 +146,30 @@ Trace: `docs/captures/ezclient_burn_click_trace.txt` (4330 frames, ~30 s).
 
 Until a burn actually starts, there is no write packet to capture.
 
+## Follow-up: valid ROM loaded, still no write
+
+A valid GBA program (the cart's own bank-0 dump, `ezloader.gba`) was loaded with
+Open ROM — EZClient listed it as `R EZLoader` and showed its info. Clicking Burn
+then opened a **"Backing up Rom"** dialog (progress 100%, CANCEL) and stalled.
+
+Capture `docs/captures/ezclient_burn_validrom_trace.txt` (host USBPcap2):
+
+- EP4 command histogram: `0x19` ×4387, `0x1A` ×500, `0x05` ×1.
+- **Still no `0x01`, `0x02`, `0x03` or `0x04`.**
+- The `0x1A` reads are only tiny addresses (4–7, 0–3, and `0xC00000..3`) — no
+  sequential ROM reads, so the "backup" step never actually read the ROM.
+
+Conclusion: EZClient enumerates the cart (`C EZ2 256M`) and accepts a ROM, but its
+burn/backup path does not drive the writer in this environment (repro/multicart
+plus the CPLD/firmware state left by the earlier diagnostics). No write packet is
+produced, so the ROM-write protocol could not be captured here.
+
+### Recommended next step
+
+Run the capture on a **standard, clean EZ-Flash II cartridge** (not this
+multicart repro) in the VM, or reset the writer to the vendor firmware by
+replugging to bootloader and letting the guest's `ezwinit.sys` load it (rather
+than the CLI `init-exact` loader tables). Either may let EZClient reach its write
+path so the `0x02`/`0x04` packets can be captured and diffed.
+
+
