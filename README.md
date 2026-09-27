@@ -39,7 +39,7 @@ That is the whole setup for a normal backup. The rest of this page is detail.
 | Back up a ROM | Read ROM tab / `dump` | Yes |
 | Back up a save | BAK Saver tab / `save-read` | Yes |
 | Restore a save | Write Saver tab / `save-write` | Be careful |
-| Write a ROM (erase + write) | Burn tab / `rom-write` | Works, up to 64 KB at offset 0 — see [Writing a ROM](#writing-a-rom) |
+| Write a ROM (erase + write) | Burn tab / `rom-write` | Works, offset 0 up to the full 32 MB — see [Writing a ROM](#writing-a-rom) |
 
 Read-only tasks (everything except writing) are the safe, supported path.
 If you only want backups, you never need the risky commands.
@@ -122,15 +122,18 @@ put in its place: unlock the flash blocks, erase, program, then lock them again.
 ./ezwriter-cli rom-verify mygame.gba             # read-only compare, no write
 ```
 
-Tested on real hardware: write, change one byte, write the original back, each
-checked with `--verify`. Current limits:
+Tested on real hardware: 512 KB and a 1449956-byte image (6 x 256 KB blocks)
+write and verify, stable across repeated reads. Current limits:
 
-- Writes start at offset 0. The CLI accepts up to 64 KB; the replay itself
-  covers 256 KB.
-- It needs the **vendor firmware** that the original driver loads. Today that
-  means: unplug and replug the writer, let a Windows 7 VM running the original
-  EZ Client load it, then power the VM off. The native `firmware-download`
-  firmware does not support writing yet.
+- Writes start at offset 0 and may span the whole 32 MB cartridge.
+- The firmware has to be loaded first. From bootloader mode the CLI does that
+  itself — no VM needed:
+  ```console
+  ./ezwriter-cli list      # "Bootloader mode" after a replug
+  ./ezwriter-cli reload    # uploads the firmware, device becomes 0548:1005
+  ```
+- A wedged writer (reads time out, or `Access is denied`) needs one physical
+  replug; `reload` alone will not recover it.
 
 Details: [docs/rom_write_status.md](docs/rom_write_status.md) and
 [docs/session_2026-09-27_capture_and_write_findings.md](docs/session_2026-09-27_capture_and_write_findings.md).

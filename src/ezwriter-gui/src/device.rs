@@ -1393,8 +1393,109 @@ pub struct RomWriteOptions {
 
 /// Captured EZClient Burn, replayed with the ROM data substituted (see
 /// `tools/gen_burn_script.py`); same as the CLI `rom-write`.
+///
+/// The capture is a **prologue** that unlocks every flash block, one **256 KB
+/// body** that clears status, erases and programs 8 x 32 KB pages, and an
+/// **epilogue** that re-locks every block. Only the body carries erase and page
+/// addresses, so a larger ROM is the same body replayed per 256 KB block with
+/// those addresses rebased (see [`rebase_body_block`]).
 const BURN_SCRIPT: &str = include_str!("../../../docs/captures/ezclient_burn_script.txt");
-const BURN_WINDOW: usize = 8 * 32 * 1024;
+/// One captured body pass programs 256 KB: 8 pages of 32 KB.
+const BURN_BLOCK: usize = 8 * 32 * 1024;
+/// Block-register stride of the captured erase writes, in 16-bit words.
+const BURN_REG_STRIDE: u32 = 0x20000;
+/// 16-bit word address stride between one body pass and the next, in bytes.
+const BURN_BYTE_STRIDE: u32 = 0x40000;
+/// The cartridge holds 32 MB.
+const BURN_MAX_BLOCKS: usize = 32 * 1024 * 1024 / BURN_BLOCK;
+/// Payloads of zero the captured preamble pushes before each body pass.
+const BURN_PREAMBLE: usize = 8;
+
+/// Split the captured script into its prologue, 256 KB body and epilogue.
+fn burn_parts() -> (Vec<&'static str>, Vec<&'static str>, Vec<&'static str>) {
+    let lines: Vec<&'static str> = BURN_SCRIPT.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with("C 02"))
+        .expect("captured burn has a page command");
+    let end = lines
+        .iter()
+        .rposition(|l| *l == "O")
+        .expect("captured burn has EP2 payloads");
+    (
+        lines[..start].to_vec(),
+        lines[start..=end].to_vec(),
+        lines[end + 1..].to_vec(),
+    )
+}
+
+fn hex_line(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Rebase one captured 256 KB body onto `block`. `block == 0` reproduces the
+/// capture exactly; see the CLI's identical helper for the address rules.
+fn rebase_body_block(body: &[&str], block: usize) -> Result<Vec<String>> {
+    let reg_off = block as u32 * BURN_REG_STRIDE;
+    let byte_off = block as u32 * BURN_BYTE_STRIDE;
+
+    let mut out = Vec::with_capacity(body.len());
+    let mut preamble_left = BURN_PREAMBLE;
+    for line in body {
+        if *line == "O" {
+            if preamble_left > 0 {
+                preamble_left -= 1;
+                out.push("Z".to_string());
+            } else {
+                out.push("O".to_string());
+            }
+            continue;
+        }
+        let (op, arg) = line.split_once(' ').unwrap_or((line, ""));
+        if op != "C" {
+            out.push((*line).to_string());
+            continue;
+        }
+        let mut b = unhex(arg)?;
+        if b.len() == 5 && b[0] == 0x02 && b[4] == 0x67 {
+            let addr = (((b[3] as u32) << 17) | ((b[2] as u32) << 9)) + byte_off;
+            b[2] = ((addr >> 9) & 0xFF) as u8;
+            b[3] = ((addr >> 17) & 0xFF) as u8;
+        } else if b.len() == 6 && b[0] == 0x19 {
+            let addr = ((b[3] as u32) << 16) | ((b[2] as u32) << 8) | b[1] as u32;
+            if addr < BURN_REG_STRIDE {
+                let addr = addr + reg_off;
+                b[1] = (addr & 0xFF) as u8;
+                b[2] = ((addr >> 8) & 0xFF) as u8;
+                b[3] = ((addr >> 16) & 0xFF) as u8;
+            }
+        }
+        out.push(format!("C {}", hex_line(&b)));
+    }
+    Ok(out)
+}
+
+/// Build the full burn script for `blocks` x 256 KB.
+fn build_burn_script(blocks: usize) -> Result<String> {
+    let (prologue, body, epilogue) = burn_parts();
+    let mut script = String::new();
+    let push = |l: &str, script: &mut String| {
+        script.push_str(l);
+        script.push('\n');
+    };
+    for l in &prologue {
+        push(l, &mut script);
+    }
+    for k in 0..blocks {
+        for l in rebase_body_block(&body, k)? {
+            push(&l, &mut script);
+        }
+    }
+    for l in &epilogue {
+        push(l, &mut script);
+    }
+    Ok(script)
+}
 
 fn unhex(s: &str) -> Result<Vec<u8>> {
     (0..s.len())
@@ -1407,7 +1508,6 @@ fn unhex(s: &str) -> Result<Vec<u8>> {
 /// unlock, erase, program 8 x 32 KB pages via EP2, re-lock.
 pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> Result<String> {
     const BULK: usize = 4096;
-    const PREAMBLE: usize = 8;
 
     if data.is_empty() {
         bail!("refusing to write an empty file");
@@ -1415,10 +1515,12 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
     if opts.byte_addr != 0 {
         bail!("the captured EZClient write path starts at offset 0 only");
     }
-    if data.len() > BURN_WINDOW {
+    let blocks = data.len().div_ceil(BURN_BLOCK);
+    if blocks > BURN_MAX_BLOCKS {
         bail!(
-            "ROM is {} bytes; the captured burn covers {BURN_WINDOW} bytes only",
-            data.len()
+            "ROM is {} bytes; the cartridge holds {} bytes",
+            data.len(),
+            BURN_MAX_BLOCKS * BURN_BLOCK
         );
     }
 
@@ -1431,12 +1533,13 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
     }
 
     let mut buf = data.to_vec();
-    buf.resize(BURN_WINDOW, 0x00); // EZClient wrote 0x00 past the ROM
-    let total = BURN_WINDOW as u64;
+    buf.resize(blocks * BURN_BLOCK, 0x00); // EZClient wrote 0x00 past the ROM
+    let total = buf.len() as u64;
+    let script = build_burn_script(blocks)?;
 
-    let mut ep2 = 0usize;
+    let mut off = 0usize;
     let mut inbuf = vec![0u8; BULK];
-    for (n, line) in BURN_SCRIPT.lines().enumerate() {
+    for (n, line) in script.lines().enumerate() {
         let (op, arg) = line.split_once(' ').unwrap_or((line, ""));
         let ctx = || format!("burn script line {}: {line}", n + 1);
         match op {
@@ -1461,19 +1564,19 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
                     }
                 }
             }
+            "Z" => {
+                handle
+                    .write_bulk(DATA_OUT_EP, &[0u8; BULK][..], TIMEOUT)
+                    .with_context(ctx)?;
+            }
             "O" => {
-                let payload = if ep2 < PREAMBLE {
-                    &[0u8; BULK][..]
-                } else {
-                    let off = (ep2 - PREAMBLE) * BULK;
-                    &buf[off..off + BULK]
-                };
+                let payload = &buf[off..off + BULK];
                 handle
                     .write_bulk(DATA_OUT_EP, payload, TIMEOUT)
                     .with_context(ctx)?;
-                ep2 += 1;
-                if ep2 > PREAMBLE && (ep2 - PREAMBLE).is_multiple_of(8) {
-                    cb(((ep2 - PREAMBLE) * BULK) as u64, total);
+                off += BULK;
+                if off.is_multiple_of(32 * 1024) || off == buf.len() {
+                    cb(off as u64, total);
                 }
             }
             "R" => {
@@ -1537,33 +1640,37 @@ fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u
         "19020041ff00",
         "19030041ff00",
     ];
-    if len > BURN_WINDOW {
-        bail!("read-back covers {BURN_WINDOW} bytes only");
+    if len > BURN_MAX_BLOCKS * BURN_BLOCK {
+        bail!(
+            "read-back covers {} bytes only",
+            BURN_MAX_BLOCKS * BURN_BLOCK
+        );
     }
 
     handle.write_bulk(CMD_EP, &[0x05], TIMEOUT)?;
     for cmd in PREFIX {
         handle.write_bulk(CMD_EP, &unhex(cmd)?, TIMEOUT)?;
     }
-    // After `01` the firmware streams EP 0x82 sequentially and never stops, so
-    // drain whatever an earlier stream left, then read one contiguous run.
-    let mut stale = [0u8; 4096];
-    for _ in 0..16 {
-        if handle
-            .read_bulk(0x82, &mut stale, Duration::from_millis(50))
-            .is_err()
-        {
-            break;
+    // EZClient re-arms every 32 KB with `01 00 <addr>>9> <addr>>17>` and then
+    // reads exactly 8 x 4096 bytes. A single `01` free-runs within the selected
+    // 128 KB bank and wraps, and the packets after a re-arm come from the
+    // previous position unless the firmware is given a moment to settle.
+    const CHUNK: usize = 32 * 1024;
+    const PACKET: usize = 4096;
+    let chunks = len.div_ceil(CHUNK);
+    let mut out = vec![0u8; chunks * CHUNK];
+    for chunk in 0..chunks {
+        let addr = (chunk * CHUNK) as u32;
+        let cmd = [0x01, 0x00, ((addr >> 9) & 0xFF) as u8, (addr >> 17) as u8];
+        handle.write_bulk(CMD_EP, &cmd, TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(20));
+        for p in 0..(CHUNK / PACKET) {
+            let start = chunk * CHUNK + p * PACKET;
+            let stop = (start + PACKET).min(out.len());
+            let _ = handle
+                .read_bulk(0x82, &mut out[start..stop], TIMEOUT)
+                .with_context(|| format!("read-back at 0x{start:06X}"))?;
         }
-    }
-    handle.write_bulk(CMD_EP, &[0x01, 0x00, 0x00, 0x00], TIMEOUT)?;
-    let mut out = vec![0u8; len.div_ceil(4096) * 4096];
-    let mut got = 0;
-    while got < out.len() {
-        let end = got + 4096;
-        got += handle
-            .read_bulk(0x82, &mut out[got..end], TIMEOUT)
-            .with_context(|| format!("read-back at 0x{got:06X}"))?;
     }
     handle.write_bulk(CMD_EP, &[0x06], TIMEOUT)?;
     out.truncate(len);

@@ -1,46 +1,60 @@
 # ROM Write: Where It Stands
 
-## Status 2026-09-27 (later): 256 KB was never verified past 128 KB
+## Status 2026-09-27 (later): write verified to 1.45 MB; the read-back was the bug
 
-`rom-write` now generalises the captured burn beyond 256 KB. The capture splits
-into three parts:
+`rom-write` generalises the captured burn beyond 256 KB. The capture splits into
+three parts:
 
 1. a **prologue** that unlocks every flash block on the cartridge,
 2. one **256 KB body** that clears status, erases and programs 8 x 32 KB pages,
 3. an **epilogue** that re-locks every block.
 
 The prologue and epilogue sweep all 540 block registers (135 addresses, each
-written in 4 consecutive low-byte variants), so they do not depend on the ROM
-size. Only the body carries erase and page addresses. `build_burn_script` in
-`src/ezwriter-cli/src/main.rs` therefore replays the captured body once per
-256 KB block, adding `block * 0x20000` to the `C 19` bus writes inside block 0's
-register window and `block * 0x40000` bytes to the `C 02 ... 67` page commands.
-Unit tests gate block 0 against the capture byte for byte.
+written in 4 consecutive low-byte variants — the whole 32 MB chip), so they do
+not depend on the ROM size. Only the body carries erase and page addresses.
+`build_burn_script` replays the captured body once per 256 KB block, adding
+`block * 0x20000` to the `C 19` bus writes inside block 0's register window and
+`block * 0x40000` bytes to the `C 02 ... 67` page commands. Unit tests gate
+block 0 against the capture byte for byte.
 
-**Hardware correction.** The earlier "at most 256 KB" limit below was never
-tested above 64 KB. Writing the stored 256 KB image
-(`captured_burn_256k.bin`) programmed all 262144 bytes, but the read-back
-matched only `0x000000..0x01FFFF`. The first difference is at exactly
-`0x020000` — where the page command's byte 3 (`addr >> 17`) first increments
-from 0 to 1 — with 61572 of the upper 131072 bytes wrong. So byte 3 is not yet
-understood as a plain address extension, and the second half of a body pass is
-not landing where the read-back expects it. Whether the write or the read-back
-is at fault is not yet resolved: the read path issues a single `01` and streams
-EP 0x82 contiguously, and that stream has only ever been checked to 64 KB.
+**VERIFIED on hardware:** 512 KB (2 blocks) and 1449956 bytes (6 blocks — the
+size of a real game ROM) both write and verify, stable across repeated reads.
 
-The writer then stopped answering. `rom-verify` began failing with
-`Access is denied. (os error 5)` on open, then `Operation timed out` on the
-read, and `reload` could not bring the device back to bootloader (`Power cycled
-OK`, then `Device did not enter bootloader mode`). The device still enumerates
-as `0548:1005` on WinUSB but no longer responds. This is the documented wedge; a
-physical replug recovers it.
+### The 128 KB read-back trap
 
-**Next step.** With a fresh device, dump the read-back after a 256 KB write
-(`rom-verify` now saves `<input>.readback.bin` on mismatch) and establish
-whether pages 4-7 of a body pass land at `0x20000..0x3FFFF` or alias onto
-`0x00000..0x1FFFF`. That decides whether the fix is in the page command or in
-the contiguous read-back, and only after that is generalisation past 256 KB
-worth relying on.
+Two conclusions written earlier in this doc were wrong, and both were about the
+read-back, not the write:
+
+* The old "at most 256 KB" ceiling had never actually been tested above 64 KB.
+  Writing the stored 256 KB image read back correct only to `0x01FFFF`, with the
+  first difference at exactly `0x020000`.
+* The read-back's upper half turned out to be **byte-for-byte identical to its
+  own lower half** — reading `0x20000` returned `0x00000` again.
+
+The cause: command `0x01` is
+`[01, 0x00, (byte_addr >> 9) & 0xFF, byte_addr >> 17]`. Byte 3 is a 128 KB bank
+and byte 2 the 32 KB page inside it. The firmware free-runs within the selected
+bank and wraps at its end, so a single `01` for a 256 KB image returns the first
+128 KB twice. EZClient re-arms every 32 KB (capture lines 1186-1257) and reads
+exactly 8 x 4096 bytes; `rom_read_ez` now does the same and settles 20 ms after
+each re-arm — the same trick `cart-read` uses at 150 ms. Without that settle the
+packets after the first chunk come from the previous position, which looks
+exactly like a corrupted write and made a correct burn look broken.
+
+The write path itself was correct throughout.
+
+### Loading the firmware and recovering a wedge
+
+The VM is **not** needed to load the firmware: from bootloader `reload` uploads
+it in one step and the device re-enumerates as `0548:1005` on WinUSB.
+
+A wedged writer reports `Access is denied` or `Operation timed out` while still
+enumerating as `0548:1005`. `reload` power-cycles the port but will not bring it
+back to bootloader; one physical replug fixes it, after which `reload` works
+again. A read-back written to a path outside the workspace can also fail with
+`Access is denied. (os error 5)` — that is the dump write, not the device.
+
+`rom-verify` saves `<input>.readback.bin` next to the input on mismatch.
 
 The sections below are the older investigation log.
 

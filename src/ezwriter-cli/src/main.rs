@@ -2783,14 +2783,13 @@ where
     let total = buf.len() as u64;
     let script = build_burn_script(blocks)?;
 
-    // Only the first 128 KB of a body pass has ever read back correctly; the
-    // second half (page byte 3 >= 1) does not land (docs/rom_write_status.md).
-    // Warn instead of refusing, because reading the result back is the point.
-    const VERIFIED: usize = 128 * 1024;
-    if data.len() > VERIFIED {
+    // Exactly one captured 256 KB block is verified on hardware. Past the first
+    // block the erase and page addresses are rebased by inference, so say so
+    // rather than implying the whole write is proven.
+    if blocks > 1 {
         eprintln!(
-            "[rom-write] warning: {} bytes is past the {VERIFIED}-byte window this path is \
-             verified for; the second half of each 256 KB block is not known to land",
+            "[rom-write] warning: {} bytes spans {blocks} blocks; only the first 256 KB \
+             block is verified, later blocks use inferred addresses",
             data.len()
         );
     }
@@ -2853,8 +2852,13 @@ where
 }
 
 /// Read the start of the ROM the way EZClient reads back after a Burn:
-/// `05`, CPLD unlock + read-array (the captured prefix), `01 00 00 00`, a
-/// sequential stream on EP 0x82, then `06`.
+/// `05`, CPLD unlock + read-array (the captured prefix), a `01` per 32 KB
+/// chunk with 8 x 4096 bytes streamed on EP 0x82, then `06`.
+///
+/// Command `0x01` is `[01, 0x00, (byte_addr >> 9) & 0xFF, byte_addr >> 17]`.
+/// Byte 3 is a 128 KB bank and byte 2 is the 32 KB page inside it. The firmware
+/// free-runs within the selected bank and wraps at its end, so a single `01`
+/// for a 256 KB image returns the first 128 KB twice.
 fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u8>> {
     const PREFIX: [&str; 24] = [
         "190000ffffd2",
@@ -2887,29 +2891,34 @@ fn rom_read_ez(handle: &DeviceHandle<GlobalContext>, len: usize) -> Result<Vec<u
         bail!("read-back covers {max} bytes only");
     }
 
+    const CHUNK: usize = 32 * 1024;
+    const PACKET: usize = 4096;
+
     handle.write_bulk(CMD_EP, &[0x05], TIMEOUT)?;
     for cmd in PREFIX {
         handle.write_bulk(CMD_EP, &parse_hex(cmd)?, TIMEOUT)?;
     }
-    // After `01` the firmware streams EP 0x82 sequentially and never stops, so
-    // drain whatever an earlier stream left, then read one contiguous run.
-    let mut stale = [0u8; 4096];
-    for _ in 0..16 {
-        if handle
-            .read_bulk(0x82, &mut stale, Duration::from_millis(50))
-            .is_err()
-        {
-            break;
+    // EZClient re-arms every 32 KB with `01 00 <addr>>9> <addr>>17>` and then
+    // reads exactly 8 x 4096 bytes (capture lines 1186-1257). A single `01`
+    // cannot do this: it free-runs within the selected 128 KB bank and wraps,
+    // so one `01` for a 256 KB image returns the first 128 KB twice.
+    let chunks = len.div_ceil(CHUNK);
+    let mut out = vec![0u8; chunks * CHUNK];
+    for chunk in 0..chunks {
+        let addr = (chunk * CHUNK) as u32;
+        let cmd = [0x01, 0x00, ((addr >> 9) & 0xFF) as u8, (addr >> 17) as u8];
+        handle.write_bulk(CMD_EP, &cmd, TIMEOUT)?;
+        // The firmware needs a moment to arm and start the burst; without this
+        // the packets after the first chunk come from the previous position.
+        // `cart-read` uses the same trick (150 ms).
+        std::thread::sleep(Duration::from_millis(20));
+        for p in 0..(CHUNK / PACKET) {
+            let start = chunk * CHUNK + p * PACKET;
+            let stop = (start + PACKET).min(out.len());
+            let _ = handle
+                .read_bulk(0x82, &mut out[start..stop], TIMEOUT)
+                .with_context(|| format!("read-back at 0x{start:06X}"))?;
         }
-    }
-    handle.write_bulk(CMD_EP, &[0x01, 0x00, 0x00, 0x00], TIMEOUT)?;
-    let mut out = vec![0u8; len.div_ceil(4096) * 4096];
-    let mut got = 0;
-    while got < out.len() {
-        let end = got + 4096;
-        got += handle
-            .read_bulk(0x82, &mut out[got..end], TIMEOUT)
-            .with_context(|| format!("read-back at 0x{got:06X}"))?;
     }
     handle.write_bulk(CMD_EP, &[0x06], TIMEOUT)?;
     out.truncate(len);
