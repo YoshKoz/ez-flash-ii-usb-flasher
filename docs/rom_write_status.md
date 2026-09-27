@@ -131,6 +131,35 @@ not re-attempt a PnP-layer fix for this; there isn't one. (Code for the
 hub-level attempt was written, tested, confirmed not to work, and reverted —
 not left in the tree.)
 
+## Word-addressing fix tested, still no write (2026-09-27)
+
+`docs/ezclient_protocol.md` (recovered separately, see above) states the cmd
+`0x04` ROM-write header must be **word-addressed** (`byte_addr / 2`), same as
+reads — `rom_program_chunk` and `rom_flash_op` were both still using the raw
+byte address. Fixed both in `main.rs`. Also confirmed via `ezwriter.sys`
+disassembly (`sub_10F76`, `USBD_ParseConfigurationDescriptorEx`) that the
+driver's pipe-index table is built in USB descriptor enumeration order, so
+client write-endpoint index `1` really does map to physical `EP2 OUT` (index
+0=EP1, 1=EP2, 2=EP3, 3=EP4 — matches the already-confirmed cmd-endpoint
+mapping). So the endpoint we've been using was already right.
+
+Tested on hardware at the documented-safe address `0xA600`:
+- Word-addressed `rom_program_chunk`/`rom_flash_op` alone: **no wedge, no
+  write** (identical symptom to every prior attempt in this file).
+- Same, plus `--init` (the CPLD/bank register replay from the earlier
+  session-init work): **no wedge, no write**, same result.
+
+Device stayed responsive both times — no new wedge, unlike the earlier
+`--init` test at addr `0x0` (loader sector) which did wedge. Not yet
+understood why addr 0 wedges and 0xA600 doesn't; could be addr-0-specific
+(loader sector CPLD mapping) rather than something `--init` does generally.
+
+This does not change the conclusion below: the packet reaches the firmware
+and the safe path runs, but the bytes never land in flash. Word-addressing
+was a real bug (now fixed) but not *the* bug. Do not re-try this exact
+combination (word-addr + EP2 + 0xA0 unlock, with or without `--init`) as if
+it were untested — it now is.
+
 ## Next step (recommended)
 
 The firmware says the payload lives at `0x7DC0`, but no host-side test has put

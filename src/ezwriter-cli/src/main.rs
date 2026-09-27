@@ -2673,7 +2673,8 @@ fn rom_program_chunk(
         byte_addr < 0x10000,
         "rom_program_chunk address must be bank-0"
     );
-    let addr = byte_addr as u16;
+    // Word-addressed, same as reads (confirmed in docs/ezclient_protocol.md).
+    let addr = (byte_addr / 2) as u16;
 
     // Step 1: stage the address on EP4.
     let cmd = [0x04u8, (addr & 0xFF) as u8, (addr >> 8) as u8];
@@ -2755,7 +2756,7 @@ fn rom_flash_op(
     settle_ms: u64,
 ) -> Result<()> {
     debug_assert!(byte_addr < 0x10000, "rom_flash_op address must be bank-0");
-    let addr = byte_addr as u16;
+    let addr = (byte_addr / 2) as u16;
     let pkt = [
         0x02u8,
         (addr & 0xFF) as u8,
