@@ -80,6 +80,57 @@ reset then a Windows PnP power cycle; that removes the device from the bus.
 **Replug once** → it returns as bootloader `0547:2131` → run `reload` again to
 re-upload `tusbez.bin`. Budget one physical replug per wedge.
 
+## Client CPLD/bank init sequence (new, 2026-09-27)
+
+Decoded from `EZClient.exe` 3.26's disassembly (`ROM session init` at `0x414f90`,
+cmd19 helper at `0x422460`, cmd1a helper at `0x4224b0`). The client runs this
+**every session, before any cmd `0x04`/`0x02` write**, via cmd `0x19` (write
+register, `[19, addr_lo, addr_mid, addr_hi, val_lo, val_hi]`) and cmd `0x1A`
+(read register, flash ID query at addr `0x000064`):
+
+| addr | val |
+|------|-----|
+| 0xFF0000 | 0xD2FF |
+| 0x000000 | 0x15FF |
+| 0x010000 | 0xD2FF |
+| 0x020000 | 0x15FF |
+| 0xA00000 | 0x667A |
+| 0xFE0000 | 0x15FF |
+| 0xFF0000 | 0xD2FF |
+| 0x000000 | 0x15FF |
+| 0x010000 | 0xD2FF |
+| 0x020000 | 0x15FF |
+| 0xE20000 | 0x51FF |
+| 0xFE0000 | 0x15FF |
+
+...then a flash-ID read (cmd `0x1A` addr `0x000064`) before the client decides
+which cart profile it's talking to.
+
+Implemented as `rom_session_init()` in `main.rs`, exposed two ways:
+- `ezwriter-cli session-init` — runs the sequence + flash-ID read only, no
+  erase/program. Safe to test in isolation.
+- `ezwriter-cli rom-write ... --init` — runs it once before the erase/program
+  loop.
+
+**Tested 2026-09-27, does not fix the write path.** `session-init` alone: ran
+clean, no wedge, flash-ID read returned `82 87 2e 00 00 ea 24 ff ae 51 69 9a
+a2 21 3d 84` (never independently verified against a known-good flash
+datasheet ID — could be a real ID or could be reading the same
+address-decode issue as everything else here). `rom-write --init` on a 16-byte
+test pattern at addr 0: same result as without `--init` — "no wedge, no
+write," verify failed, original loader bytes unchanged. So the init sequence
+by itself isn't the missing unlock; whatever gap is described above (payload
+never reaching `0x7DC0`) is still unexplained.
+
+Also confirmed this session: **`reload`'s OS power-cycle (`Disable-PnpDevice`
+/ `Enable-PnpDevice`) is not a real port power cycle on this hardware's USB3
+root hub controller.** Tried both at the device level and at the parent root
+hub level — neither recovers a device wedged as `VID_0000&PID_0002`
+("descriptor request failed"). Only a physical unplug/replug clears it. Do
+not re-attempt a PnP-layer fix for this; there isn't one. (Code for the
+hub-level attempt was written, tested, confirmed not to work, and reverted —
+not left in the tree.)
+
 ## Next step (recommended)
 
 The firmware says the payload lives at `0x7DC0`, but no host-side test has put

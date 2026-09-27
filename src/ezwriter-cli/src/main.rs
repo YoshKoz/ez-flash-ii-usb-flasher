@@ -259,7 +259,12 @@ enum Commands {
         /// Read the whole range back and compare after writing
         #[arg(long)]
         verify: bool,
+        /// Run the client's CPLD/bank register init sequence before writing
+        #[arg(long)]
+        init: bool,
     },
+    /// Run the client's CPLD/bank register init sequence and read flash ID (no erase/program)
+    SessionInit,
     /// Reload firmware: CPUCS reset → OS power cycle if needed → auto init-exact
     Reload,
     /// Bulk endpoint test
@@ -2511,6 +2516,7 @@ fn cmd_rom_write(
     delay_ms: u64,
     no_erase: bool,
     verify: bool,
+    init: bool,
 ) -> Result<()> {
     let data =
         fs::read(&input).with_context(|| format!("reading ROM file: {}", input.display()))?;
@@ -2564,6 +2570,11 @@ fn cmd_rom_write(
         byte_addr,
         end
     );
+
+    if init {
+        println!("  Running client CPLD/bank init sequence...");
+        rom_session_init(&handle)?;
+    }
 
     if !no_erase {
         // 64 KB sectors: erase every sector the write range touches. Within the
@@ -2762,6 +2773,100 @@ fn rom_flash_op(
     Ok(())
 }
 
+/// Send command `0x19`: `[0x19, addr_lo, addr_mid, addr_hi, val_lo, val_hi]`.
+///
+/// Reverse-engineered from `EZClient.exe`'s cmd19 helper (`0x422460`), which
+/// builds this exact 6-byte packet on `CMD_EP`. `addr` is 24-bit; `val` is the
+/// 16-bit register value.
+fn reg_write(handle: &DeviceHandle<GlobalContext>, addr: u32, val: u16) -> Result<()> {
+    let cmd = [
+        0x19u8,
+        (addr & 0xFF) as u8,
+        ((addr >> 8) & 0xFF) as u8,
+        ((addr >> 16) & 0xFF) as u8,
+        (val & 0xFF) as u8,
+        (val >> 8) as u8,
+    ];
+    handle
+        .write_bulk(CMD_EP, &cmd, TIMEOUT)
+        .with_context(|| format!("reg write addr=0x{addr:06X} val=0x{val:04X}"))?;
+    Ok(())
+}
+
+/// Send command `0x1A` (read register / flash ID) and return the EP2 IN reply.
+///
+/// Mirrors `EZClient.exe`'s cmd1a helper (`0x4224b0`): `[0x1A, addr_lo,
+/// addr_mid, addr_hi]` on `CMD_EP`, response on the data-in endpoint.
+fn reg_read(handle: &DeviceHandle<GlobalContext>, addr: u32) -> Result<[u8; 64]> {
+    let cmd = [
+        0x1Au8,
+        (addr & 0xFF) as u8,
+        ((addr >> 8) & 0xFF) as u8,
+        ((addr >> 16) & 0xFF) as u8,
+    ];
+    handle
+        .write_bulk(CMD_EP, &cmd, TIMEOUT)
+        .with_context(|| format!("reg read addr=0x{addr:06X}"))?;
+    std::thread::sleep(Duration::from_millis(10));
+    let mut buf = [0u8; 64];
+    handle
+        .read_bulk(0x82, &mut buf, TIMEOUT)
+        .with_context(|| format!("reg read reply addr=0x{addr:06X}"))?;
+    Ok(buf)
+}
+
+/// Replay the client's CPLD/bank-register init sequence, run once per session
+/// before any ROM erase/program op (`EZClient.exe` runs it via cmd05 → this
+/// register block → cmd1A flash-ID read, all before its first cmd04 write).
+///
+/// Sequence and register values decoded byte-for-byte from the client's
+/// disassembly (calls into `0x422460` at `0x414fe3`..`0x4153fa`); not yet
+/// confirmed to be required for programming to succeed, only confirmed to be
+/// what the vendor tool does first.
+fn rom_session_init(handle: &DeviceHandle<GlobalContext>) -> Result<()> {
+    const SEQ: &[(u32, u16)] = &[
+        (0xFF0000, 0xD2FF),
+        (0x000000, 0x15FF),
+        (0x010000, 0xD2FF),
+        (0x020000, 0x15FF),
+        (0xA00000, 0x667A),
+        (0xFE0000, 0x15FF),
+        (0xFF0000, 0xD2FF),
+        (0x000000, 0x15FF),
+        (0x010000, 0xD2FF),
+        (0x020000, 0x15FF),
+        (0xE20000, 0x51FF),
+        (0xFE0000, 0x15FF),
+    ];
+    for &(addr, val) in SEQ {
+        reg_write(handle, addr, val)?;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let id = reg_read(handle, 0x000064)?;
+    println!("  Flash ID: {}", hex_prefix(&id));
+    Ok(())
+}
+
+/// Standalone test path for `rom_session_init`: flash-ID read only, no erase/program.
+fn cmd_session_init() -> Result<()> {
+    let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+    let handle = device.open()?;
+    let config = device.active_config_descriptor()?;
+    for iface in config.interfaces() {
+        for iface_desc in iface.descriptors() {
+            let _ = handle.claim_interface(iface_desc.interface_number());
+        }
+    }
+    for ep in 0x01u8..=0x07u8 {
+        let _ = handle.clear_halt(ep);
+        let _ = handle.clear_halt(ep | 0x80);
+    }
+    println!("Running client CPLD/bank init sequence...");
+    rom_session_init(&handle)?;
+    println!("OK");
+    Ok(())
+}
+
 fn cmd_bulk_test() -> Result<()> {
     let (device, _desc) = if let Ok(d) = find_device(EZWRITER_VID, EZWRITER_PID) {
         println!("Device in ACTIVE mode.");
@@ -2921,6 +3026,12 @@ fn wait_for_mode(vid: u16, pid: u16, timeout_secs: u64) -> bool {
     false
 }
 
+/// Driver-level unbind/rebind of the device node. On this hardware's USB3
+/// root hub controller this is not a real port power cycle — confirmed on
+/// hardware 2026-09-27, along with the same result at the parent-hub level —
+/// so it does not reliably recover a device wedged as `VID_0000&PID_0002`
+/// ("descriptor request failed"). Only a physical unplug/replug clears that
+/// state; there is no PnP-layer fallback for it.
 #[cfg(target_os = "windows")]
 fn power_cycle_windows(vid: &str, pid: &str) -> Result<()> {
     println!("Power cycling via Windows PnP manager...");
@@ -3192,7 +3303,9 @@ fn main() -> Result<()> {
             delay,
             no_erase,
             verify,
-        } => cmd_rom_write(input, addr, delay, no_erase, verify)?,
+            init,
+        } => cmd_rom_write(input, addr, delay, no_erase, verify, init)?,
+        Commands::SessionInit => cmd_session_init()?,
         Commands::BulkTest => cmd_bulk_test()?,
         Commands::FlashProbe {
             addr,
