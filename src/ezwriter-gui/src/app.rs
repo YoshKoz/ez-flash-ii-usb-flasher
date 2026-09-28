@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use crate::device;
+use crate::theme;
 
 /// Decode Nintendo 156-byte logo bitmap into 24x52 pixel array
 /// Format: column-major, 3 bytes per column (24 rows = 3*8), 52 columns
@@ -269,14 +270,7 @@ impl eframe::App for EzWriterApp {
         }
 
         egui::Panel::top("menu").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("EZ Client");
-                ui.separator();
-                if ui.button("Refresh List").clicked() {
-                    self.progress.clear();
-                    self.detect(self.tx.clone());
-                }
-            });
+            self.show_toolbar(ui);
         });
 
         // Output list. The original's is an embedded browser pointed at the
@@ -310,16 +304,19 @@ impl eframe::App for EzWriterApp {
                     egui::vec2(200.0, ui.available_height()),
                     egui::Layout::top_down(egui::Align::LEFT),
                     |ui| {
+                        ui.add_space(2.0);
                         ui.strong("Sections");
-                        for (t, label) in [
-                            (AppTab::Status, "Device"),
-                            (AppTab::CartInfo, "Cartridge"),
-                            (AppTab::ReadRom, "Read ROM"),
-                            (AppTab::WriteRom, "Burn"),
-                            (AppTab::ReadSave, "Save backup"),
-                            (AppTab::WriteSave, "Save write"),
+                        ui.add_space(4.0);
+                        for (t, icon, label) in [
+                            (AppTab::Status, theme::icons::CHIP, "Device"),
+                            (AppTab::CartInfo, theme::icons::CARTRIDGE, "Cartridge"),
+                            (AppTab::ReadRom, theme::icons::DOWNLOAD, "Read ROM"),
+                            (AppTab::WriteRom, theme::icons::FLASH, "Burn"),
+                            (AppTab::ReadSave, theme::icons::SAVE, "Save backup"),
+                            (AppTab::WriteSave, theme::icons::UPLOAD, "Save write"),
                         ] {
-                            if ui.selectable_label(self.tab == t, label).clicked() {
+                            let text = egui::RichText::new(format!("  {icon}   {label}"));
+                            if ui.selectable_label(self.tab == t, text).clicked() {
                                 self.tab = t;
                             }
                         }
@@ -388,6 +385,111 @@ impl EzWriterApp {
         }
     }
 
+    /// Record a chosen ROM file and detect the save library it was built for.
+    /// The markers sit megabytes in, so this is a full read; doing it here keeps
+    /// the burn itself uninterrupted.
+    fn set_rom(&mut self, path: PathBuf) {
+        self.rom_save_type = std::fs::read(&path)
+            .ok()
+            .and_then(|data| device::detect_saver_from_rom(&data));
+        self.write_rom_path = path;
+    }
+
+    /// Ask for a ROM file, then record it.
+    fn pick_rom(&mut self) {
+        if let Some(path) = FileDialog::new()
+            .set_title("Open GBA ROM")
+            .add_filter("GBA ROM", &["gba", "bin"])
+            .add_filter("All Files", &["*"])
+            .pick_file()
+        {
+            self.set_rom(path);
+        }
+    }
+
+    /// The EZClient-style toolbar: an icon with a caption under it, which is how
+    /// the original lays its actions out along the top.
+    fn show_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            if theme::tool_button(
+                ui,
+                theme::icons::OPEN_FILE,
+                "Open ROM",
+                "Choose a ROM file to burn",
+            )
+            .clicked()
+            {
+                self.pick_rom();
+            }
+            if theme::tool_button(
+                ui,
+                theme::icons::DELETE,
+                "Clear",
+                "Forget the selected ROM file",
+            )
+            .clicked()
+            {
+                self.write_rom_path = PathBuf::new();
+                self.rom_save_type = None;
+            }
+            if theme::tool_button(
+                ui,
+                theme::icons::FLASH,
+                "Burn",
+                "Write a ROM to the cartridge",
+            )
+            .clicked()
+            {
+                self.tab = AppTab::WriteRom;
+            }
+            if theme::tool_button(
+                ui,
+                theme::icons::DOWNLOAD,
+                "Read ROM",
+                "Dump the ROM from the cartridge",
+            )
+            .clicked()
+            {
+                self.tab = AppTab::ReadRom;
+            }
+            if theme::tool_button(
+                ui,
+                theme::icons::UPLOAD,
+                "Write Saver",
+                "Write a save file to the cartridge",
+            )
+            .clicked()
+            {
+                self.tab = AppTab::WriteSave;
+            }
+            if theme::tool_button(
+                ui,
+                theme::icons::SAVE,
+                "BAK Saver",
+                "Back the cartridge's save up to a file",
+            )
+            .clicked()
+            {
+                self.tab = AppTab::ReadSave;
+            }
+            ui.separator();
+            if theme::tool_button(
+                ui,
+                theme::icons::REFRESH,
+                "Refresh",
+                "Re-scan for the writer and cartridge",
+            )
+            .clicked()
+            {
+                self.progress.clear();
+                self.detect(self.tx.clone());
+            }
+        });
+        ui.add_space(6.0);
+    }
+
     /// Append a line to the Output list, prefixed with elapsed time.
     fn log_push(&mut self, msg: &str) {
         const MAX_LINES: usize = 500;
@@ -453,14 +555,23 @@ impl EzWriterApp {
         ui.heading("Device Status");
         ui.separator();
         ui.label(&self.status_text);
-        if ui.button("[R] Detect Device").clicked() {
+        if ui
+            .button(theme::icon_text(theme::icons::SEARCH, "Detect Device"))
+            .clicked()
+        {
             self.progress.clear();
             self.detect(self.tx.clone());
         }
         ui.separator();
         ui.heading("Initialize (load firmware)");
         ui.label("Plug in device in bootloader mode, then click below:");
-        if ui.button("[!] Initialize AN2131 (load firmware)").clicked() {
+        if ui
+            .button(theme::icon_text(
+                theme::icons::WARNING,
+                "Initialize AN2131 (load firmware)",
+            ))
+            .clicked()
+        {
             if let Some((t1, t2)) = Self::locate_loaders() {
                 let tx = self.tx.clone();
                 self.progress_value = 0.01;
@@ -493,7 +604,13 @@ impl EzWriterApp {
                     .into();
             }
         }
-        if ui.button("[R] Reset Cartridge Flash").clicked() {
+        if ui
+            .button(theme::icon_text(
+                theme::icons::REFRESH,
+                "Reset Cartridge Flash",
+            ))
+            .clicked()
+        {
             let tx = self.tx.clone();
             thread::spawn(move || match device::reset_cartridge() {
                 Ok(()) => {
@@ -507,7 +624,13 @@ impl EzWriterApp {
         ui.separator();
         ui.heading("Eject");
         ui.label("Ends the cartridge session and parks the flash so the cartridge can be removed safely:");
-        if ui.button("[E] Eject Cartridge Safely").clicked() {
+        if ui
+            .button(theme::icon_text(
+                theme::icons::EJECT,
+                "Eject Cartridge Safely",
+            ))
+            .clicked()
+        {
             let tx = self.tx.clone();
             self.progress = "Ejecting...".into();
             thread::spawn(move || match device::eject_safely() {
@@ -530,7 +653,13 @@ impl EzWriterApp {
 
     fn show_cart_info(&mut self, ui: &mut egui::Ui) {
         ui.heading("Cartridge Information");
-        if ui.button("[?] Detect Cartridge").clicked() {
+        if ui
+            .button(theme::icon_text(
+                theme::icons::CARTRIDGE,
+                "Detect Cartridge",
+            ))
+            .clicked()
+        {
             let tx = self.tx.clone();
             self.progress_value = 0.01;
             thread::spawn(move || match device::read_cart_header() {
@@ -608,7 +737,9 @@ impl EzWriterApp {
     fn show_read_rom(&mut self, ui: &mut egui::Ui) {
         ui.heading("Read ROM to File");
         ui.horizontal_wrapped(|ui| {
-            if ui.button("[..] Select File...").clicked()
+            if ui
+                .button(theme::icon_text(theme::icons::OPEN_FILE, "Select File..."))
+                .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Save GBA ROM As")
                     .add_filter("GBA ROM", &["gba", "bin"])
@@ -680,26 +811,25 @@ impl EzWriterApp {
     fn show_write_rom(&mut self, ui: &mut egui::Ui) {
         ui.heading("Write ROM to Cartridge (Burn)");
         ui.colored_label(
-            egui::Color32::RED,
+            theme::DANGER,
             "[!]  DESTRUCTIVE — this ERASES and rewrites cartridge flash. Back it up first.",
         );
         ui.separator();
 
         ui.horizontal_wrapped(|ui| {
-            if ui.button("[..] Select ROM File...").clicked()
+            if ui
+                .button(theme::icon_text(
+                    theme::icons::OPEN_FILE,
+                    "Select ROM File...",
+                ))
+                .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Open GBA ROM")
                     .add_filter("GBA ROM", &["gba", "bin"])
                     .add_filter("All Files", &["*"])
                     .pick_file()
             {
-                // Detect the ROM's save library here rather than at burn time:
-                // the markers sit megabytes in, so this is a full read, and
-                // doing it on selection keeps the burn itself uninterrupted.
-                self.rom_save_type = std::fs::read(&path)
-                    .ok()
-                    .and_then(|data| device::detect_saver_from_rom(&data));
-                self.write_rom_path = path;
+                self.set_rom(path);
             }
             ui.label(self.write_rom_path.display().to_string());
         });
@@ -745,7 +875,12 @@ impl EzWriterApp {
                 &mut self.write_rom_trim,
                 "Trim ROM (strip trailing 0xFF/0x00 padding before writing)",
             );
-            if ui.button("[..] Select IPS Patch...").clicked()
+            if ui
+                .button(theme::icon_text(
+                    theme::icons::OPEN_FILE,
+                    "Select IPS Patch...",
+                ))
+                .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Open IPS Patch")
                     .add_filter("IPS patch", &["ips"])
@@ -769,11 +904,11 @@ impl EzWriterApp {
         if self.write_rom_path.as_os_str().is_empty() {
             ui.label("Select a ROM file to enable writing.");
         } else if addr.is_none() {
-            ui.colored_label(
-                egui::Color32::RED,
-                "Start address must be hex, e.g. 0x000000.",
-            );
-        } else if ui.button("[w] ERASE + WRITE ROM").clicked() {
+            ui.colored_label(theme::DANGER, "Start address must be hex, e.g. 0x000000.");
+        } else if ui
+            .button(theme::icon_text(theme::icons::FLASH, "ERASE + WRITE ROM"))
+            .clicked()
+        {
             let path = self.write_rom_path.clone();
             let opts = device::RomWriteOptions {
                 byte_addr: addr.unwrap(),
@@ -868,7 +1003,7 @@ impl EzWriterApp {
                 ));
             } else {
                 ui.colored_label(
-                    egui::Color32::from_rgb(255, 170, 0),
+                    theme::WARN,
                     format!(
                         "Detected: {} — game code '{}' is not in the built-in database, so the save \
                          chip type is unknown. Reading is disabled rather than guessed. Run \
@@ -879,7 +1014,9 @@ impl EzWriterApp {
             }
         }
         ui.horizontal_wrapped(|ui| {
-            if ui.button("[..] Select File...").clicked()
+            if ui
+                .button(theme::icon_text(theme::icons::OPEN_FILE, "Select File..."))
+                .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Save Save As")
                     .add_filter("GBA Save", &["sav", "bin"])
@@ -889,7 +1026,11 @@ impl EzWriterApp {
             }
             ui.label(self.save_path.display().to_string());
         });
-        if !self.save_path.as_os_str().is_empty() && ui.button("[v] Dump Save").clicked() {
+        if !self.save_path.as_os_str().is_empty()
+            && ui
+                .button(theme::icon_text(theme::icons::SAVE, "Dump Save"))
+                .clicked()
+        {
             let path = self.save_path.clone();
             let tx = self.tx.clone();
             let save_type = self.effective_save_type();
@@ -980,10 +1121,7 @@ impl EzWriterApp {
 
     fn show_write_save(&mut self, ui: &mut egui::Ui) {
         ui.heading("Write Save to Cartridge");
-        ui.colored_label(
-            egui::Color32::RED,
-            "[!]  WRITE OPERATION — USE WITH CAUTION",
-        );
+        ui.colored_label(theme::DANGER, "[!]  WRITE OPERATION — USE WITH CAUTION");
         ui.separator();
         if let Some(ref hdr) = self.cart_header {
             ui.label(format!("Current cart: {} [{}]", hdr.title, hdr.code));
@@ -1002,7 +1140,12 @@ impl EzWriterApp {
             ui.label("(!) No cartridge detected — detect in Cart Info tab first");
         }
         ui.horizontal_wrapped(|ui| {
-            if ui.button("[..] Select Save File...").clicked()
+            if ui
+                .button(theme::icon_text(
+                    theme::icons::OPEN_FILE,
+                    "Select Save File...",
+                ))
+                .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Open Save File")
                     .add_filter("GBA Save", &["sav", "bin"])
@@ -1015,7 +1158,13 @@ impl EzWriterApp {
         });
         if !self.save_path.as_os_str().is_empty() && self.cart_header.is_some() {
             ui.separator();
-            if ui.button("[w] Write Save to Cartridge").clicked() {
+            if ui
+                .button(theme::icon_text(
+                    theme::icons::UPLOAD,
+                    "Write Save to Cartridge",
+                ))
+                .clicked()
+            {
                 let path = self.save_path.clone();
                 let tx = self.tx.clone();
                 let save_type = self.effective_save_type();
