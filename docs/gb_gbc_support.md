@@ -93,6 +93,32 @@ GBA title                PM_CRYSTAL
 header checksum          stored=DC computed=DC       True
 ```
 
-Not yet done: **booting the result on real hardware**. The writer currently
-holds a Game Boy cartridge, so the burn and a read-back verify are still
-outstanding.
+## Burned to hardware
+
+With the EZ-Flash II cartridge in the writer:
+
+```
+ezwriter-cli rom-write target\diag\yellow.goomba.gba --verify --init
+  Written 1310720/1310720 bytes        (rounds up to the 256 KB block size)
+  Verify OK: cartridge matches the input file.
+  ROM write complete: 1092184 bytes    26.4s
+```
+
+Read back off the cartridge independently:
+
+```
+cart-info            Title: POKEMON YELL   Code: GMBA
+cart-read 0xAA58     ff 00 00 00 00 00 00 00 ff 00 ...   = the file, byte for byte
+cart-read 0xAB5C     ce ed 66 66 cc 0d 00 0b 03 73 ...   = the GB logo
+```
+
+`0xAB5C` is `0xAA58 + 0x104`, so the Game Boy ROM's standard header sits exactly
+where a full-logo scan looks for it. The cartridge reports itself as the game,
+not as `GOOMBAGOOMBA`.
+
+The source ROM is a clean dump: entry point `00 C3 AB 01`, MBC5+RAM+Battery
+(`0x1B`), 1 MB (`0x05`), 32 KB RAM (`0x03`), and its GB header checksum matches
+(`0x97`).
+
+Not proven: that Goomba **boots** the game on real GBA hardware. The bytes on the
+cartridge match the image exactly, but nobody has run it on a console.
