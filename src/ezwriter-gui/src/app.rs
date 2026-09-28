@@ -45,6 +45,7 @@ fn parse_hex_u32(s: &str) -> Option<u32> {
     u32::from_str_radix(t, 16).ok()
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
 enum AppTab {
     Status,
     CartInfo,
@@ -260,43 +261,6 @@ impl eframe::App for EzWriterApp {
             ui.horizontal(|ui| {
                 ui.heading("EZ Client");
                 ui.separator();
-                if ui
-                    .selectable_label(matches!(self.tab, AppTab::Status), "Device")
-                    .clicked()
-                {
-                    self.tab = AppTab::Status;
-                }
-                if ui
-                    .selectable_label(matches!(self.tab, AppTab::CartInfo), "Show ROM Info")
-                    .clicked()
-                {
-                    self.tab = AppTab::CartInfo;
-                }
-                if ui
-                    .selectable_label(matches!(self.tab, AppTab::ReadRom), "Read ROM")
-                    .clicked()
-                {
-                    self.tab = AppTab::ReadRom;
-                }
-                if ui
-                    .selectable_label(matches!(self.tab, AppTab::WriteRom), "Burn")
-                    .clicked()
-                {
-                    self.tab = AppTab::WriteRom;
-                }
-                if ui
-                    .selectable_label(matches!(self.tab, AppTab::ReadSave), "BAK Saver")
-                    .clicked()
-                {
-                    self.tab = AppTab::ReadSave;
-                }
-                if ui
-                    .selectable_label(matches!(self.tab, AppTab::WriteSave), "Write Saver")
-                    .clicked()
-                {
-                    self.tab = AppTab::WriteSave;
-                }
-                ui.separator();
                 if ui.button("Refresh List").clicked() {
                     self.progress.clear();
                     self.detect(self.tx.clone());
@@ -335,7 +299,21 @@ impl eframe::App for EzWriterApp {
                     egui::vec2(200.0, ui.available_height()),
                     egui::Layout::top_down(egui::Align::LEFT),
                     |ui| {
-                        ui.heading("ROM Lists");
+                        ui.strong("Sections");
+                        for (t, label) in [
+                            (AppTab::Status, "Device"),
+                            (AppTab::CartInfo, "Cartridge"),
+                            (AppTab::ReadRom, "Read ROM"),
+                            (AppTab::WriteRom, "Burn"),
+                            (AppTab::ReadSave, "Save backup"),
+                            (AppTab::WriteSave, "Save write"),
+                        ] {
+                            if ui.selectable_label(self.tab == t, label).clicked() {
+                                self.tab = t;
+                            }
+                        }
+                        ui.separator();
+                        ui.strong("ROM Lists");
                         ui.separator();
                         match &self.cart_header {
                             Some(hdr) => {
@@ -354,14 +332,17 @@ impl eframe::App for EzWriterApp {
                     },
                 );
                 ui.separator();
-                ui.vertical(|ui| match self.tab {
-                    AppTab::Status => self.show_status(ui),
-                    AppTab::CartInfo => self.show_cart_info(ui),
-                    AppTab::ReadRom => self.show_read_rom(ui),
-                    AppTab::WriteRom => self.show_write_rom(ui),
-                    AppTab::ReadSave => self.show_read_save(ui),
-                    AppTab::WriteSave => self.show_write_save(ui),
-                });
+                // One scrolling page rather than tab-clipped panels.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.tab {
+                        AppTab::Status => self.show_status(ui),
+                        AppTab::CartInfo => self.show_cart_info(ui),
+                        AppTab::ReadRom => self.show_read_rom(ui),
+                        AppTab::WriteRom => self.show_write_rom(ui),
+                        AppTab::ReadSave => self.show_read_save(ui),
+                        AppTab::WriteSave => self.show_write_save(ui),
+                    });
             });
         });
     }
