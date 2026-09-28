@@ -105,17 +105,69 @@ the true value is **`0xF8428009`**. `extract_specialpatch.py` therefore decodes
 immediates from the file bytes rather than the disassembler text — a
 mis-rendered immediate is exactly how a patch would silently corrupt a game.
 
-### Still to extract
+### What the injected stub is
 
-- The exact composition of the `SaverPatch` stub (which bytes of the 188-byte
-  template are patched, and the role of the 24-byte piece and the two
-  `mov ecx,40h` sequences at `0x1000338D` / `0x100033B4`).
-- Which `EZCARTTYPE` values take the injection path, and the branch conditions.
-- Which title marker drives Soft Reset specifically, and the full byte list for
-  each `SpecialRomPatch` case, plus `Modify1MSaverRom` (`0x3C70`).
+The stub's trailing literal pool identifies it beyond doubt — these are GBA
+memory-mapped addresses, not opaque data:
 
-Until that is done these features stay unimplemented on purpose — a wrong ROM
-patch is silent and corrupts a game.
+| Stub offset | Value | Meaning |
+|---|---|---|
+| `+0xA0` | `0x0D000000` | save region base |
+| `+0xA4` | `0x0E000000` | GBA **SRAM** window |
+| `+0xA8` | `0x0E000004` | SRAM + 4 |
+| `+0xAC` | `0x040000D4` | **DMA3SAD** |
+| `+0xB0` | `0x040000D8` | **DMA3DAD** |
+| `+0xB4` | `0x040000DC` | **DMA3CNT** |
+| `+0xB8` | `0x08FFFFFF` | ROM end / mask |
+
+So `SaverPatch` injects a **hand-written, DMA3-based GBA save routine** into the
+game, writing to `0x0E000000`. Both templates are committed as
+[`docs/captures/patchdll_saverpatch_stub.txt`](captures/patchdll_saverpatch_stub.txt),
+extracted by [`tools/extract_saverpatch_stub.py`](../tools/extract_saverpatch_stub.py).
+
+Before injecting it, `SaverPatch` **searches for free space**: it fills a
+256-byte scratch buffer with `0xFF` (`0x10003392` `or eax,-1` / `0x10003395`
+`rep stos`), `FindMotif`s the ROM for that run (`0x100033CC`), aligns the hit to
+16 bytes and nudges it (`0x100033DE` `add eax,10h` / `0x100033E1`
+`and eax,0FFFFF0h`), writes a 10-byte header (`0x1000343D`/`0x10003444`/
+`0x1000344C`) and then `rep movs`s the stub in at `0x10003459`.
+
+### Modify1MSaverRom is keyed on the SDK version string
+
+`0x10003C8D` calls `FindMotif(rom, len, "FLASH1M_V", 9)` — the only site using
+the `_V` marker **with** its version suffix — then requires `[eax+9]=='1'`,
+`[eax+0Ah]=='0'` and `[eax+0Bh]=='3'` (`0x10003C9F`, `0x10003CA8`, `0x10003CAD`).
+That pins it to ROMs built against `FLASH1M_V103`. It writes the ROM through a
+path other than immediate stores, so the stores are not yet listed.
+
+### Why these are not being implemented
+
+The recovery is now good enough to make the call, and the answer is **not to
+implement them**:
+
+1. **It is proprietary code injection, not a patch table.** `SaverPatch` ships
+   ~200 bytes of EZ's own GBA save routine and writes it into the user's ROM.
+   Reproducing it faithfully means redistributing their code.
+2. **Its behaviour depends on `EZCARTTYPE`**, a cart-type parameter our tool
+   does not model, across ~45 branch sites whose conditions are only partly
+   resolved. Picking the wrong branch writes the wrong routine.
+3. **The write is destructive and silent.** It appends a header plus 188 bytes
+   into space found by scanning for `0xFF`, permanently modifying the ROM file.
+   A wrong or partial implementation corrupts a game with no error.
+4. **`SpecialRomPatch` is fully recovered but unverifiable here.** Its patches
+   are tied to specific commercial ROMs (e.g. `BOKUTAI` writes at `0xEEF0E4`+
+   assume one exact 16 MB layout, guarded for `SONICPINBALL` by a `cmp` against
+   a known original). We have none of those ROMs to test against, so the writes
+   could not be validated — and applying them to a different dump would corrupt
+   it.
+5. **The practical benefit is small.** Saver Patch existed for odd and bootleg
+   cartridges; save-type detection is already covered by our `GAME_DB` and
+   `save_size_bytes`, which is what the GUI uses.
+
+The reverse-engineering is complete enough to reach that conclusion with
+evidence, and that is the deliverable: the mechanism, the motif table, the
+injected stub, and the full `SpecialRomPatch` byte set — all committed, none of
+it guessed.
 
 The full site table — 45 sites, 43 with a simple two-push argument pair, with
 lengths and exact motif bytes — is committed as

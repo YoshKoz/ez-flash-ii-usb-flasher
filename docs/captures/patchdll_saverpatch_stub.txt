@@ -1,0 +1,43 @@
+# Code stubs CRomManager::SaverPatch injects into a ROM
+# Source: patchDLL.dll .data, read at the addresses pushed at 0x10003342 and
+# 0x10003359. Lengths come from the rep movs counts at 0x1000333D and
+# 0x10003365. See tools/extract_saverpatch_stub.py for the derivation.
+
+=== template A (companion): .data 0x1004C, 24 bytes ===
+  +0x000  E0 20 00 05 01 88 01 22 08 1C 10 40 02 1C 11 04 . ....."...@....
+  +0x010  08 0C 00 28 01 D0 1B E0                         ...(....
+
+=== template B (188-byte stub): .data 0x10064, 188 bytes ===
+  +0x000  39 68 27 48 81 42 23 D0 89 1C 08 88 01 28 02 D1 9h'H.B#......(..
+  +0x010  24 48 78 60 33 E0 00 23 00 22 89 1C 10 B4 01 24 $Hx`3..#.".....$
+  +0x020  08 68 20 40 5B 00 03 43 89 1C 52 1C 06 2A F7 D1 .h @[..C..R..*..
+  +0x030  10 BC 39 60 DB 01 02 20 00 02 1B 18 0E 20 00 06 ..9`... ..... ..
+  +0x040  1B 18 7B 60 39 1C 08 31 08 88 09 38 08 80 16 E0 ..{`9..1...8....
+  +0x050  15 49 00 23 00 22 10 B4 01 24 08 68 20 40 5B 00 .I.#."...$.h @[.
+  +0x060  03 43 89 1C 52 1C 06 2A F7 D1 10 BC DB 01 02 20 .C..R..*....... 
+  +0x070  00 02 1B 18 0E 20 00 06 1B 18 08 3B 3B 60 0B 48 ..... .....;;`.H
+  +0x080  39 68 01 60 0A 48 79 68 01 60 0A 48 39 1C 08 31 9h.`.Hyh.`.H9..1
+  +0x090  0A 88 80 21 09 06 0A 43 02 60 07 48 00 47 00 00 ...!...C.`.H.G..
+  +0x0A0  00 00 00 0D 00 00 00 0E 04 00 00 0E D4 00 00 04 ................
+  +0x0B0  D8 00 00 04 DC 00 00 04 FF FF FF 08             ............
+
+=== relocation: stack slots written with bytes derived from the target offset ===
+  0x1000335E  mov [esp+0F8h],cl   cl = (offset & 0xFF) + 0x21   (0x10003354/0x10003356)
+  0x100033FE  mov [esp+0F9h],dl   dl = (offset + 0x1F) >> 8     (0x100033F4)
+  0x1000340E  mov [esp+0F9h],cl   cl = offset >> 8              (0x1000340B, else branch:
+                                 chosen when the byte before the aligned
+                                 offset is 0xFF or 0xCD, at 0x100033EA/EF)
+  0x1000337C  mov [esp+0FEh],al   al = offset >> 16              (0x10003373)
+
+  NOTE: the exact byte offset of these slots *within the stub* is not pinned
+  here. The template is copied to [esp+44h] at 0x10003347 and the final rep
+  movs reads [esp+40h] at 0x10003455, but further pushes and pops in between
+  (the two FindMotif calls at 0x100033A0 / 0x100033CC) shift esp, so mapping
+  the slots onto stub offsets needs a full stack-frame simulation of the
+  function. Treat the stub offsets as unresolved rather than guessed.
+
+=== 10-byte header written at the blank area before the stub ===
+  [0] = dword from [esp+28h]   (0x1000343D)
+  [4] = dword from [esp+2Ch]   (0x10003444)
+  [8] = word  from [esp+30h]   (0x1000344C)
+  where [esp+2Ch]/[esp+2Dh]/[esp+2Eh] hold the aligned offset bytes
