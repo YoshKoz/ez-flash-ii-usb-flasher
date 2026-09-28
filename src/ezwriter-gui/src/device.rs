@@ -553,6 +553,50 @@ pub fn eject_safely() -> Result<String> {
     ))
 }
 
+/// CPLD unlock + read-array setup EZClient sends before any read
+/// (capture lines 1174-1185). Without it the CPLD is not mapping the cartridge
+/// for reads and packets come back as garbage rather than an error.
+const ROM_READ_PREFIX: [&str; 24] = [
+    "190000ffffd2",
+    "19000000ff15",
+    "19000001ffd2",
+    "19000002ff15",
+    "190000c40000",
+    "190000feff15",
+    "190000ffffd2",
+    "19000000ff15",
+    "19000001ffd2",
+    "19000002ff15",
+    "190000e2ff15",
+    "190000feff15",
+    "19000000ff00",
+    "19010000ff00",
+    "19020000ff00",
+    "19030000ff00",
+    "190000c0ff00",
+    "190100c0ff00",
+    "190200c0ff00",
+    "190300c0ff00",
+    "19000041ff00",
+    "19010041ff00",
+    "19020041ff00",
+    "19030041ff00",
+];
+
+/// Open a cartridge read session: `05` then the CPLD read-array prefix.
+pub fn rom_read_begin(handle: &DeviceHandle<GlobalContext>) -> Result<()> {
+    handle.write_bulk(CMD_EP, &[0x05], TIMEOUT)?;
+    for cmd in ROM_READ_PREFIX {
+        handle.write_bulk(CMD_EP, &unhex(cmd)?, TIMEOUT)?;
+    }
+    Ok(())
+}
+
+/// Close a cartridge read session.
+pub fn rom_read_end(handle: &DeviceHandle<GlobalContext>) {
+    let _ = handle.write_bulk(CMD_EP, &[0x06], TIMEOUT);
+}
+
 // ---------------------------------------------------------------------------
 // CartSession — streaming dump
 // ---------------------------------------------------------------------------
@@ -732,6 +776,9 @@ impl CartSession {
         let mut last_progress: u64 = 0;
         let mut header_validated = false;
 
+        // The CPLD has to be put into read-array mode once for the whole dump.
+        rom_read_begin(&self.handle)?;
+
         while written < rom_size {
             let wish = std::cmp::min(CHUNK_SIZE, rom_size - written) as usize;
             let addr = start_offset + written as u32;
@@ -813,6 +860,8 @@ impl CartSession {
                 last_progress = written;
             }
         }
+
+        rom_read_end(&self.handle);
 
         file.flush().context("final flush")?;
         file.sync_all().context("final sync_all")?;
@@ -1267,7 +1316,9 @@ pub fn parse_gba_header(buf: &[u8]) -> Result<CartHeader> {
 
 pub fn read_cart_header() -> Result<CartHeader> {
     let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+    rom_read_begin(&handle)?;
     let buf = read_rom_region(&handle, 0, 256)?;
+    rom_read_end(&handle);
     parse_gba_header(&buf)
 }
 
