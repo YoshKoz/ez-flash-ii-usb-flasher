@@ -395,6 +395,10 @@ impl EzWriterApp {
         }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(2));
+        ui.separator();
+        // Detect / Initialize / Reset report failures through `progress`; without
+        // this the Device tab looked like it did nothing when they failed.
+        ui.label(&self.progress);
     }
 
     fn show_cart_info(&mut self, ui: &mut egui::Ui) {

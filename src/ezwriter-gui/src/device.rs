@@ -16,7 +16,14 @@ pub const DATA_EP: u8 = 0x82;
 /// Measured on real hardware: 2 ms reproduces a 256 KB reference byte-for-byte
 /// across repeated runs, while 0 ms and 1 ms return stale packet data and
 /// produce a different file. Do not lower this without re-measuring.
-pub const ROM_READ_DELAY_MS: u64 = 2;
+/// Settle time after arming a cartridge read with command `0x01`.
+///
+/// The firmware free-runs once armed and needs a moment before the first packet
+/// reflects the new address; the CLI's working `cart-read` path waits 150 ms for
+/// the same reason. At 2 ms the GUI read stale data and reported "No valid GBA
+/// cartridge header" even with a valid cartridge inserted.
+pub const ROM_READ_DELAY_MS: u64 = 20;
+
 /// How many read/confirm rounds a chunk gets before the cartridge is declared
 /// unstable. A marginal cart usually settles within two or three reads.
 pub const ROM_READ_ATTEMPTS: u32 = 4;
@@ -520,6 +527,13 @@ impl CartSession {
     ///
     /// A short transfer is an error: accepting one would shift every following
     /// chunk in the output file.
+    /// Legacy 64-byte reader. Superseded by [`read_rom_region`].
+    ///
+    /// It arms command `0x01` with the word address in bytes 1-2, but this
+    /// firmware wants `[01, 0x00, (byte_addr >> 9) & 0xFF, byte_addr >> 17]`, so
+    /// re-arming per chunk pulls stale data. Kept only because
+    /// [`Self::read_rom_chunk_ep0`] shares its shape.
+    #[allow(dead_code)]
     pub fn read_rom_chunk(&self, byte_addr: u32) -> Result<[u8; 64]> {
         let word_addr = byte_addr / 2;
         let addr_16 = (word_addr & 0xFFFF) as u16;
@@ -556,7 +570,9 @@ impl CartSession {
     }
 
     /// Read a chunk, retrying transient failures, and optionally requiring two
-    /// consecutive reads to agree. See [`read_confirmed`].
+    /// consecutive reads to agree. See [`read_confirmed`]. Superseded by
+    /// [`read_rom_region`] for bulk reads.
+    #[allow(dead_code)]
     pub fn read_rom_chunk_checked(&self, byte_addr: u32, confirm: bool) -> Result<[u8; 64]> {
         read_confirmed(byte_addr, confirm, || self.read_rom_chunk(byte_addr))
     }
@@ -656,7 +672,9 @@ impl CartSession {
 
         const FLUSH_INTERVAL: u64 = 256 * 1024;
         const PROGRESS_INTERVAL: u64 = 64 * 1024;
-        const CHUNK_SIZE: u64 = 64;
+        // One command 0x01 addresses a 32 KB page and streams 8 x 4096 bytes,
+        // so read a whole page per iteration rather than re-arming per 64 bytes.
+        const CHUNK_SIZE: u64 = 32 * 1024;
 
         let mut written: u64 = 0;
         let mut last_flush: u64 = 0;
@@ -665,7 +683,14 @@ impl CartSession {
 
         while written < rom_size {
             let wish = std::cmp::min(CHUNK_SIZE, rom_size - written) as usize;
-            let chunk = self.read_rom_chunk_checked(start_offset + written as u32, confirm)?;
+            let addr = start_offset + written as u32;
+            let chunk = read_rom_region(&self.handle, addr, wish)?;
+            if confirm {
+                let again = read_rom_region(&self.handle, addr, wish)?;
+                if again != chunk {
+                    bail!("unstable read at 0x{addr:06X}: two consecutive reads disagree");
+                }
+            }
 
             if !header_validated {
                 eprintln!(
@@ -801,6 +826,46 @@ pub fn partial_path(path: &Path) -> PathBuf {
 
 /// Read `count` 64-byte chunks starting at `byte_addr`.
 /// Used by Cart Info detection (count=4) and save read operations.
+/// Arm the cartridge for reading and stream `len` bytes from `start`.
+///
+/// Command `0x01` is `[01, 0x00, (byte_addr >> 9) & 0xFF, byte_addr >> 17]`:
+/// byte 2 is the 32 KB page, byte 3 the 128 KB bank. The firmware free-runs once
+/// armed and wraps at the end of the selected bank, so it must be re-armed every
+/// 32 KB and given `ROM_READ_DELAY_MS` to settle; the 8 x 4096 packets inside a
+/// chunk then stream back-to-back.
+///
+/// Reading the whole image after a single `01` looks like it works but returns
+/// the first 128 KB twice (the CLI's `rom_read_ez` documents the same trap).
+pub fn read_rom_region(
+    handle: &DeviceHandle<GlobalContext>,
+    start: u32,
+    len: usize,
+) -> Result<Vec<u8>> {
+    const CHUNK: usize = 32 * 1024;
+    const PACKET: usize = 4096;
+
+    let chunks = len.div_ceil(CHUNK);
+    let mut out = vec![0u8; chunks * CHUNK];
+    for chunk in 0..chunks {
+        let addr = start + (chunk * CHUNK) as u32;
+        let cmd = [0x01, 0x00, ((addr >> 9) & 0xFF) as u8, (addr >> 17) as u8];
+        handle.write_bulk(CMD_EP, &cmd, TIMEOUT)?;
+        std::thread::sleep(Duration::from_millis(ROM_READ_DELAY_MS));
+        for p in 0..(CHUNK / PACKET) {
+            let s = chunk * CHUNK + p * PACKET;
+            let e = (s + PACKET).min(out.len());
+            handle
+                .read_bulk(DATA_EP, &mut out[s..e], TIMEOUT)
+                .with_context(|| format!("read-back at 0x{:06X}", start as usize + s))?;
+        }
+    }
+    out.truncate(len);
+    Ok(out)
+}
+
+/// Legacy small-chunk reader, superseded by [`read_rom_region`] (which uses the
+/// command encoding this firmware actually accepts).
+#[allow(dead_code)]
 pub fn read_chunks(cmd_byte: u8, suffix: u8, byte_addr: u32, count: u32) -> Result<Vec<u8>> {
     let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
 
@@ -1150,7 +1215,8 @@ pub fn parse_gba_header(buf: &[u8]) -> Result<CartHeader> {
 }
 
 pub fn read_cart_header() -> Result<CartHeader> {
-    let buf = read_chunks(1, 0, 0, 4)?;
+    let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+    let buf = read_rom_region(&handle, 0, 256)?;
     parse_gba_header(&buf)
 }
 
