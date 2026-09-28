@@ -78,3 +78,4 @@ WinUSB must be installed via Zadig before any USB communication works. The `driv
 - `docs/firmware_re_rom_write.md` — ROM write/erase protocol decoded from `tusbez.bin` + loader patches
 - `docs/multi_game_format.md` — what is known about the EZ-Flash multi-game loader layout
 - `docs/rom_write_test_plan.md` — step-by-step hardware test for the write path
+- `docs/rom_write_capture_plan.md` — current plan: capture EZ Client (Win7 VM) traffic, replay it natively, minimise into `rom-write`

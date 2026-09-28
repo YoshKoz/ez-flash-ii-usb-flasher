@@ -285,6 +285,9 @@ have no observable effect on this specific cartridge/writer pairing.
 
 ## Next step (recommended)
 
+**Superseded by `rom_write_capture_plan.md`**: EZ Client 3.26 now runs in a
+Win7 x86 VirtualBox VM, so the capture below is unblocked.
+
 The firmware says the payload lives at `0x7DC0`, but no host-side test has put
 bytes there. The fastest way to settle it is a **USB capture of the original EZ
 Client writing a ROM**, which pins down the exact packet that fills `0x7DC0`:
