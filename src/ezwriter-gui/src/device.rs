@@ -1322,6 +1322,187 @@ pub fn read_cart_header() -> Result<CartHeader> {
     parse_gba_header(&buf)
 }
 
+// ---------------------------------------------------------------------------
+// Box art ("banner") for the loaded cartridge
+// ---------------------------------------------------------------------------
+//
+// A GBA ROM carries no banner: its header only has a 12-byte title, the game
+// code, the maker and the Nintendo logo, which is identical in every GBA ROM.
+// So the banner is fetched from the libretro thumbnails project and matched by
+// the cartridge title, then cached next to the executable.
+
+/// A decoded box-art image, ready to upload as an egui texture.
+pub struct Banner {
+    pub width: usize,
+    pub height: usize,
+    /// RGBA8, row-major, `width * height * 4` bytes.
+    pub rgba: Vec<u8>,
+}
+
+const BOXART_BASE: &str =
+    "https://thumbnails.libretro.com/Nintendo%20-%20Game%20Boy%20Advance/Named_Boxarts/";
+/// One-shot listing of every box-art path in the thumbnails repo (no 1000-entry
+/// page cap, unlike the contents API).
+const BOXART_INDEX_URL: &str = "https://api.github.com/repos/libretro-thumbnails/\
+                                Nintendo_-_Game_Boy_Advance/git/trees/master?recursive=1";
+/// Re-fetch the index after this long.
+const INDEX_MAX_AGE_SECS: u64 = 30 * 24 * 3600;
+
+fn banner_cache_dir() -> Result<PathBuf> {
+    let dir = resolve_asset("banners");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    Ok(dir)
+}
+
+/// Percent-encode for a URL path segment. Keeps the punctuation libretro uses
+/// in release names so the result stays readable.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'('
+            | b')'
+            | b','
+            | b'\'' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Fetch `url` to `dest` with curl.exe (present on Windows 10+), which keeps a
+/// TLS stack out of this crate.
+fn curl_to_file(url: &str, dest: &Path) -> Result<()> {
+    let status = std::process::Command::new("curl.exe")
+        .args(["-sS", "-L", "--fail", "--max-time", "180", "-o"])
+        .arg(dest)
+        .arg(url)
+        .status()
+        .context("running curl.exe (expected at C:\\Windows\\System32)")?;
+    if !status.success() {
+        bail!("curl failed ({status}) for {url}");
+    }
+    Ok(())
+}
+
+fn normalize_title(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Best box-art filename for a cartridge title, from the thumbnail index.
+///
+/// The ROM title is truncated to 12 bytes ("POKEMON FIRE") while the index uses
+/// the full release name ("Pokemon - FireRed Version (USA).png"), so match on a
+/// normalised prefix and prefer US releases.
+fn pick_boxart(index: &str, title: &str) -> Option<String> {
+    let want = normalize_title(title);
+    if want.is_empty() {
+        return None;
+    }
+    let tree: serde_json::Value = serde_json::from_str(index).ok()?;
+    let mut cands: Vec<(u8, usize, String)> = Vec::new();
+    for entry in tree.get("tree")?.as_array()? {
+        let Some(name) = entry.get("path").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let Some(name) = name.strip_prefix("Named_Boxarts/") else {
+            continue;
+        };
+        if !name.ends_with(".png") || !normalize_title(name).starts_with(&want) {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        let score = if lower.contains("(usa)") {
+            0
+        } else if lower.contains("europe") {
+            2
+        } else {
+            1
+        };
+        cands.push((score, name.len(), name.to_string()));
+    }
+    cands.sort();
+    cands.into_iter().next().map(|(_, _, n)| n)
+}
+
+fn decode_png_rgba(bytes: &[u8]) -> Result<Banner> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf)?;
+    let data = &buf[..info.buffer_size()];
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => data.to_vec(),
+        png::ColorType::Rgb => data
+            .chunks(3)
+            .filter(|c| c.len() == 3)
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
+        png::ColorType::Grayscale => data.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::GrayscaleAlpha => data
+            .chunks(2)
+            .filter(|c| c.len() == 2)
+            .flat_map(|c| [c[0], c[0], c[0], c[1]])
+            .collect(),
+        other => bail!("unsupported box-art PNG colour type {other:?}"),
+    };
+    Ok(Banner {
+        width: info.width as usize,
+        height: info.height as usize,
+        rgba,
+    })
+}
+
+/// Box art for the cartridge in the writer: cached `banners/<CODE>.png` if
+/// present, otherwise matched by title and downloaded.
+pub fn fetch_boxart(title: &str, code: &str) -> Result<Banner> {
+    let dir = banner_cache_dir()?;
+    let key: String = code
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_uppercase();
+    let cached = dir.join(format!(
+        "{}.png",
+        if key.is_empty() { "unknown" } else { &key }
+    ));
+
+    if !cached.exists() {
+        let index_path = dir.join("boxart-index.json");
+        let stale = std::fs::metadata(&index_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|age| age.as_secs() > INDEX_MAX_AGE_SECS)
+            .unwrap_or(true);
+        if stale {
+            curl_to_file(BOXART_INDEX_URL, &index_path).context("fetching the box-art index")?;
+        }
+        let index = std::fs::read_to_string(&index_path)
+            .with_context(|| format!("reading {}", index_path.display()))?;
+        let name = pick_boxart(&index, title)
+            .with_context(|| format!("no box art matched cartridge title '{title}'"))?;
+        let url = format!("{BOXART_BASE}{}", url_encode(&name));
+        curl_to_file(&url, &cached).with_context(|| format!("downloading box art '{name}'"))?;
+    }
+
+    let bytes = std::fs::read(&cached).with_context(|| format!("reading {}", cached.display()))?;
+    decode_png_rgba(&bytes).with_context(|| format!("decoding {}", cached.display()))
+}
+
 pub fn dump_to_file(path: &PathBuf, data: &[u8]) -> Result<()> {
     std::fs::write(path, data).with_context(|| format!("Failed to write {}", path.display()))
 }

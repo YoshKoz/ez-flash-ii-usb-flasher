@@ -13,3 +13,5 @@ original_backup/
 deps/
 captures/*.pcap
 .claude/
+
+banners/

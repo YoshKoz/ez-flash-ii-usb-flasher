@@ -75,6 +75,8 @@ enum BgCmd {
         total_bytes: u64,
     },
     Error(String),
+    /// Box art for the detected cartridge; `None` when nothing matched.
+    Banner(Box<Option<device::Banner>>),
 }
 
 pub struct EzWriterApp {
@@ -82,6 +84,9 @@ pub struct EzWriterApp {
     status_text: String,
     cart_header: Option<device::CartHeader>,
     nintendo_logo: Vec<[u8; 3]>,
+    /// Box art for the cartridge currently detected, once it has been fetched.
+    banner: Option<egui::TextureHandle>,
+    banner_status: String,
     rom_path: PathBuf,
     save_path: PathBuf,
     /// Write ROM tab state.
@@ -109,6 +114,8 @@ impl Default for EzWriterApp {
             status_text: "Start: click Detect Device or Initialize".into(),
             cart_header: None,
             nintendo_logo: Vec::new(),
+            banner: None,
+            banner_status: String::new(),
             rom_path: PathBuf::new(),
             save_path: PathBuf::new(),
             write_rom_path: PathBuf::new(),
@@ -133,11 +140,47 @@ impl eframe::App for EzWriterApp {
                 BgCmd::Status(s) => self.status_text = s,
                 BgCmd::Header(h) => {
                     self.cart_header = *h;
-                    if let Some(ref hdr) = self.cart_header {
-                        self.progress = format!("Cartridge: {} [{}]", hdr.title, hdr.code);
-                        self.nintendo_logo = decode_nintendo_logo(&hdr.raw_header[4..160]);
+                    let info = self
+                        .cart_header
+                        .as_ref()
+                        .map(|hdr| (hdr.title.clone(), hdr.code.clone(), hdr.raw_header));
+                    match info {
+                        Some((title, code, raw)) => {
+                            self.progress = format!("Cartridge: {title} [{code}]");
+                            self.nintendo_logo = decode_nintendo_logo(&raw[4..160]);
+                            // Box art is a network fetch, so do it off the UI thread.
+                            self.banner = None;
+                            self.banner_status = "looking for box art...".into();
+                            let tx = self.tx.clone();
+                            thread::spawn(move || {
+                                let b = device::fetch_boxart(&title, &code).ok();
+                                let _ = tx.send(BgCmd::Banner(Box::new(b)));
+                            });
+                        }
+                        None => {
+                            self.banner = None;
+                            self.banner_status = String::new();
+                        }
                     }
                 }
+                BgCmd::Banner(b) => match *b {
+                    Some(banner) => {
+                        let img = egui::ColorImage::from_rgba_unmultiplied(
+                            [banner.width, banner.height],
+                            &banner.rgba,
+                        );
+                        self.banner = Some(ui.ctx().load_texture(
+                            "boxart",
+                            img,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                        self.banner_status = String::new();
+                    }
+                    None => {
+                        self.banner = None;
+                        self.banner_status = "no box art found for this cartridge".into();
+                    }
+                },
                 BgCmd::Progress(s) => {
                     self.progress = s;
                 }
@@ -197,6 +240,8 @@ impl eframe::App for EzWriterApp {
                     self.progress = format!("Error: {e}");
                     self.cart_header = None;
                     self.nintendo_logo.clear();
+                    self.banner = None;
+                    self.banner_status.clear();
                 }
             }
         }
@@ -435,8 +480,28 @@ impl EzWriterApp {
         ui.separator();
 
         if let Some(ref hdr) = self.cart_header {
+            // The cartridge's box art, when one could be matched.
+            if let Some(tex) = &self.banner {
+                let native = tex.size_vec2();
+                let target_h = 200.0_f32;
+                let size = if native.y > 0.0 {
+                    egui::vec2(native.x * (target_h / native.y), target_h)
+                } else {
+                    native
+                };
+                ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                    tex.id(),
+                    size,
+                )));
+                ui.add_space(6.0);
+            } else if !self.banner_status.is_empty() {
+                ui.label(&self.banner_status);
+                ui.add_space(6.0);
+            }
             ui.horizontal(|ui| {
-                if !self.nintendo_logo.is_empty() {
+                // The Nintendo logo is identical for every GBA game, so once
+                // there is real box art it is just noise.
+                if self.banner.is_none() && !self.nintendo_logo.is_empty() {
                     let size = egui::Vec2::new(52.0 * 5.0, 24.0 * 5.0);
                     let (response, painter) = ui.allocate_painter(size, egui::Sense::hover());
                     let origin = response.rect.min;
@@ -466,6 +531,12 @@ impl EzWriterApp {
         }
         ui.separator();
         ui.label(&self.progress);
+        // The box-art fetch runs on a worker thread; keep repainting until it
+        // lands, otherwise the message is never consumed on this tab.
+        if !self.banner_status.is_empty() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(300));
+        }
     }
 
     fn show_read_rom(&mut self, ui: &mut egui::Ui) {
