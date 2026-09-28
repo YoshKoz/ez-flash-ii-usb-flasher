@@ -1503,6 +1503,69 @@ pub fn fetch_boxart(title: &str, code: &str) -> Result<Banner> {
     decode_png_rgba(&bytes).with_context(|| format!("decoding {}", cached.display()))
 }
 
+/// Apply an IPS patch to a ROM image in place.
+///
+/// Format: a `PATCH` header, then records of a 3-byte big-endian offset and a
+/// 2-byte big-endian size. A zero size selects RLE — a 2-byte big-endian run
+/// length and one fill byte. `EOF` ends the patch.
+///
+/// Records past the end of the image extend it, padded with `0xFF` (erased
+/// flash), which is what a patch that appends data expects.
+pub fn apply_ips(rom: &mut Vec<u8>, patch: &[u8]) -> Result<String> {
+    if patch.len() < 8 || &patch[..5] != b"PATCH" {
+        bail!("not an IPS patch (no PATCH header)");
+    }
+    let before = rom.len();
+    let mut i = 5usize;
+    let mut records = 0usize;
+    let mut written = 0usize;
+    loop {
+        if patch.len() < i + 3 {
+            bail!("truncated IPS patch: no record or EOF at byte {i}");
+        }
+        if &patch[i..i + 3] == b"EOF" {
+            break;
+        }
+        let off =
+            ((patch[i] as usize) << 16) | ((patch[i + 1] as usize) << 8) | patch[i + 2] as usize;
+        i += 3;
+        if patch.len() < i + 2 {
+            bail!("truncated IPS record header at byte {i}");
+        }
+        let size = ((patch[i] as usize) << 8) | patch[i + 1] as usize;
+        i += 2;
+
+        if size == 0 {
+            if patch.len() < i + 3 {
+                bail!("truncated IPS RLE record at byte {i}");
+            }
+            let run = ((patch[i] as usize) << 8) | patch[i + 1] as usize;
+            let value = patch[i + 2];
+            i += 3;
+            if off + run > rom.len() {
+                rom.resize(off + run, 0xFF);
+            }
+            rom[off..off + run].fill(value);
+            written += run;
+        } else {
+            if patch.len() < i + size {
+                bail!("truncated IPS data record at byte {i}");
+            }
+            if off + size > rom.len() {
+                rom.resize(off + size, 0xFF);
+            }
+            rom[off..off + size].copy_from_slice(&patch[i..i + size]);
+            i += size;
+            written += size;
+        }
+        records += 1;
+    }
+    Ok(format!(
+        "IPS: {records} record(s), {written} byte(s) written, ROM {before} -> {} bytes",
+        rom.len()
+    ))
+}
+
 /// Strip trailing padding from a ROM dump before writing.
 ///
 /// Over-dumped cartridges are usually padded with `0xFF` (erased flash) or
@@ -2074,6 +2137,61 @@ mod tests {
     #[test]
     fn lookup_game_not_found() {
         assert!(lookup_game("XXXX").is_none());
+    }
+
+    /// IPS: a plain record, an RLE record, and a record that extends the image.
+    #[test]
+    fn ips_patch_applies_records_and_rle() {
+        let mut rom = vec![0xAAu8; 16];
+        let mut patch = b"PATCH".to_vec();
+        // Plain: offset 4, 3 bytes.
+        patch.extend_from_slice(&[0x00, 0x00, 0x04, 0x00, 0x03, 0x11, 0x22, 0x33]);
+        // RLE: offset 10, run 4, fill 0x77.
+        patch.extend_from_slice(&[0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x04, 0x77]);
+        // Extend: offset 20, 2 bytes -> image grows, padded with 0xFF.
+        patch.extend_from_slice(&[0x00, 0x00, 0x14, 0x00, 0x02, 0xDE, 0xAD]);
+        patch.extend_from_slice(b"EOF");
+
+        let summary = apply_ips(&mut rom, &patch).unwrap();
+        assert_eq!(&rom[4..7], &[0x11, 0x22, 0x33]);
+        assert_eq!(&rom[10..14], &[0x77; 4]);
+        assert_eq!(rom.len(), 22, "record past the end extends the image");
+        assert_eq!(
+            &rom[14..16],
+            &[0xAA; 2],
+            "bytes inside the image are untouched"
+        );
+        assert_eq!(&rom[16..20], &[0xFF; 4], "the new gap is erased 0xFF");
+        assert_eq!(&rom[20..22], &[0xDE, 0xAD]);
+        assert!(summary.contains("3 record(s)"));
+    }
+
+    #[test]
+    fn ips_patch_rejects_junk_and_truncation() {
+        let mut rom = vec![0u8; 16];
+        assert!(apply_ips(&mut rom, b"NOPE").is_err());
+        // Header only, no record and no EOF.
+        assert!(apply_ips(&mut rom, b"PATCH").is_err());
+        // Record claims 8 bytes but supplies 1.
+        let mut bad = b"PATCH".to_vec();
+        bad.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x08, 0x01]);
+        assert!(apply_ips(&mut rom, &bad).is_err());
+    }
+
+    #[test]
+    fn trim_strips_padding_but_keeps_a_whole_block() {
+        // 8 MB of data followed by 8 MB of erased flash trims to 8 MB.
+        let mut rom = vec![0x5Au8; 8 * 1024 * 1024];
+        rom.extend(std::iter::repeat_n(0xFFu8, 8 * 1024 * 1024));
+        assert_eq!(trim_rom_padding(&rom).len(), 8 * 1024 * 1024);
+
+        // A wholly erased image still keeps one block rather than nothing.
+        let erased = vec![0xFFu8; 1024 * 1024];
+        assert_eq!(trim_rom_padding(&erased).len(), 256 * 1024);
+
+        // Trailing real data is left alone.
+        let solid = vec![0x5Au8; 512 * 1024];
+        assert_eq!(trim_rom_padding(&solid).len(), 512 * 1024);
     }
 
     #[test]

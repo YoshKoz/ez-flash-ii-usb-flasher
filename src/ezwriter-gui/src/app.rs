@@ -102,6 +102,8 @@ pub struct EzWriterApp {
     write_rom_init: bool,
     /// Trim trailing 0xFF/0x00 padding before writing.
     write_rom_trim: bool,
+    /// Optional IPS patch applied to the image before writing.
+    ips_path: PathBuf,
     progress: String,
     progress_value: f32,
     /// Read every ROM chunk twice and require agreement. Catches the stale-EP2
@@ -133,6 +135,7 @@ impl Default for EzWriterApp {
             write_rom_verify: true,
             write_rom_init: true,
             write_rom_trim: false,
+            ips_path: PathBuf::new(),
             progress: String::new(),
             progress_value: 0.0,
             confirm_chunks: true,
@@ -701,6 +704,25 @@ impl EzWriterApp {
                 &mut self.write_rom_trim,
                 "Trim ROM (strip trailing 0xFF/0x00 padding before writing)",
             );
+            ui.horizontal(|ui| {
+                if ui.button("[..] Select IPS Patch...").clicked()
+                    && let Some(path) = FileDialog::new()
+                        .set_title("Open IPS Patch")
+                        .add_filter("IPS patch", &["ips"])
+                        .add_filter("All Files", &["*"])
+                        .pick_file()
+                {
+                    self.ips_path = path;
+                }
+                if self.ips_path.as_os_str().is_empty() {
+                    ui.label("(no IPS patch applied)");
+                } else {
+                    ui.label(format!("IPS: {}", self.ips_path.display()));
+                    if ui.button("Clear").clicked() {
+                        self.ips_path = PathBuf::new();
+                    }
+                }
+            });
         });
         ui.separator();
 
@@ -723,22 +745,45 @@ impl EzWriterApp {
             };
             let tx = self.tx.clone();
             let trim = self.write_rom_trim;
+            let ips_path = self.ips_path.clone();
             self.progress_value = 0.01;
             thread::spawn(move || {
-                let data = match std::fs::read(&path) {
+                let mut data = match std::fs::read(&path) {
                     Ok(d) => d,
                     Err(e) => {
                         let _ = tx.send(BgCmd::Error(e.to_string()));
                         return;
                     }
                 };
-                let data = if trim {
-                    device::trim_rom_padding(&data)
-                } else {
-                    &data[..]
-                };
+                if trim {
+                    let keep = device::trim_rom_padding(&data).len();
+                    let _ = tx.send(BgCmd::Status(format!(
+                        "Trim ROM: {} -> {keep} bytes",
+                        data.len()
+                    )));
+                    data.truncate(keep);
+                }
+                // Patch after trimming so patched bytes are never trimmed away.
+                if !ips_path.as_os_str().is_empty() {
+                    let patch = match std::fs::read(&ips_path) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            let _ = tx.send(BgCmd::Error(format!("reading IPS patch: {e}")));
+                            return;
+                        }
+                    };
+                    match device::apply_ips(&mut data, &patch) {
+                        Ok(summary) => {
+                            let _ = tx.send(BgCmd::Status(summary));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(BgCmd::Error(format!("IPS patch: {e}")));
+                            return;
+                        }
+                    }
+                }
                 let total = data.len() as u64;
-                match device::write_rom(data, &opts, |written, tot| {
+                match device::write_rom(&data, &opts, |written, tot| {
                     let _ = tx.send(BgCmd::RomWriteProgress {
                         bytes_written: written,
                         total_bytes: tot,
