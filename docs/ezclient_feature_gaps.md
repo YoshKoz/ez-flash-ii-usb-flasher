@@ -251,11 +251,70 @@ patch is silent and corrupts a game.
 
 ## Other systems (NES / PCE / GBC / GB)
 
-`Sysbin\` ships the loaders — `pocketnes.gba`, `pceadvance.gba`,
-`EZNDSLoader.nds.gba`, `goombafront.exe`, `ez_flash.bin` — so support means
-writing those plus a per-system loader table, not a write-protocol change. The
-`EnumNES2GBAFromFiles` / `EnumPCE2GBAFromFiles` / `EnumGBC2GBAFromFiles` exports
-in `patchDLL.dll` are the conversion entry points. Not started.
+`Sysbin\` ships the loaders, and their GBA headers identify them:
+
+| Loader | Size | GBA title | Game code |
+|---|---|---|---|
+| `goomba.gba` | 43,608 | `GOOMBAGOOMBA` | `GMBA` |
+| `pocketnes.gba` | 47,224 | `PocketNESS  ` | `PNES` |
+| `pceadvance.gba` | 47,880 | | `PCEA` |
+| `EZLoader_GBA.bin` | 42,436 | | |
+| `goombafront.exe` | 81,920 | Win32/VB6 packer | |
+
+**This is the answer to what the `GMBA` / `PNES` / `PCEA` / `FCA` markers in
+`SpecialRomPatch` are** (see above): they are these loader ROMs' game codes, not
+games. `SpecialRomPatch` matches a loader and applies a per-loader fixup — for
+`PNES` it is `[0xDCC] = 0x02000004` (`0x100040D4`).
+
+So "GBC/GB ROM support" means **wrapping a GB/GBC ROM so it runs on the GBA
+flash cart under Goomba**. It is not, and never was, a cartridge dumper.
+
+### How EZClient builds the wrapped image
+
+`EZClient.exe` contains the literal strings `\sysbin\goomba.gba`,
+`\sysbin\pocketnes.gba` and `\Sysbin\temp.gba`, so it loads the loader itself
+rather than shelling out to `goombafront.exe`.
+
+`patchDLL.dll` then does the wrapping in memory:
+`?EnumGBC2GBAFromFiles@CRomManager@@QAEKPAEPAKAAVCStringArray@@@Z` at `0x15A0`,
+whose signature `(unsigned char** rom, unsigned long* len, CStringArray& files)`
+is the buffer-in/buffer-out form.
+
+**Not yet extracted.** The function is 673 instructions and contains *no*
+immediates in the `0x400`–`0x200000` range at all, so the offsets are not
+hardcoded in it — the loader locates the payload at runtime. Pinning the format
+down therefore means either reading how `goomba.gba` finds its ROM (it embeds
+the GB logo fragment `CE ED 66 66` at `0xc14`, so it validates a GB header), or
+driving FluBBa's packer to produce a reference image and diffing it. That
+remains open.
+
+## Dumping an original Game Boy cartridge is not possible with this hardware
+
+Tested with a real Pokemon Yellow cartridge in the writer's slot:
+
+```
+cart-info -> Title: @  Code: @  Maker: @
+cart-read -> 0x000000: 00 00 00 00 ...   (chunk 0)
+              0x000040: 20 00 20 00 ...
+              0x000080: 40 00 40 00 ...
+              0x0000C0: 60 00 60 00 ...
+```
+
+The value tracks the **address** in steps of `0x20` across 64-byte chunks. Over
+8192 sampled bytes there are only six distinct values (`00 20 40 60 80 a0`) —
+a floating/synthetic bus, not a ROM. Reading at `0x10000` and `0x100000` gives
+the same ramp.
+
+That is expected. The EZ-Writer drives the **GBA** cartridge bus. A GB/GBC cart
+is a different interface: 5 V rather than 3.3 V, MBC banking rather than a flat
+address bus, and a GBA only talks to one after its own SoC switches into GBC
+mode — which an external writer has no way to do. EZClient never had this
+feature either.
+
+Backing up GB/GBC cartridges needs a dedicated dumper: GBxCart RW, Epilogue
+GB Operator, or a BennVenn Joey. See the
+[NDEVR backup guide](https://ndevr.org/backup-game-boy-games/#dump) and the
+[Provenance ripping notes](https://wiki.provenance-emu.com/using-provenance/roms/ripping-roms).
 
 ## GoldenFinger / Password
 
