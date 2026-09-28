@@ -661,7 +661,7 @@ impl EzWriterApp {
             let sz = device::save_size_bytes(&hdr.save_type);
             if device::is_known_save_type(&hdr.save_type) {
                 ui.label(format!(
-                    "Detected: {} → {} save ({} KB)",
+                    "Detected: {} -> {} save ({} KB)",
                     hdr.title,
                     hdr.save_type,
                     sz / 1024
