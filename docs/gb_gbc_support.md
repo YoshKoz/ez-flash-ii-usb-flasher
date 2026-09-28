@@ -38,17 +38,22 @@ loader, whose stored checksum is `0xD0`.
 
 ## Using it
 
-Put `goomba.gba` beside the executable, in the working directory, or in
-`firmware/`, then select a `.gb` or `.gbc` file on the Burn section. The tool
-wraps it, writes `<name>.goomba.gba` next to the source ROM, reports the sizes,
-and uses that image as the write source — the rest of the burn path is unchanged.
+The loader ships in `firmware/goomba.gba` (43,608 bytes, taken from the EZ Client
+install — Goomba is Dwedit's freely redistributable homebrew, and EZClient
+bundled it too). The lookup checks beside the executable, `<exe>/firmware`, the
+working directory and `firmware/`.
+
+Select a `.gb` or `.gbc` file on the Burn section. The tool wraps it, writes
+`<name>.goomba.gba` next to the source ROM, reports the sizes, and uses that
+image as the write source — the rest of the burn path is unchanged.
 
 The wrapped image is written beside the source ROM rather than to `%TEMP%`,
 because the process can be denied access outside its own tree (`os error 5`).
 
 ## Verified
 
-Wrapping Pokemon Yellow (1,048,576 bytes) with the shipped loader:
+Wrapping Pokemon Yellow (GB, 1,048,576 bytes) and Pokemon Crystal (GBC,
+2,097,152 bytes, CGB flag `0xC0` at `0x143`) with the shipped loader:
 
 ```
 image 1092184 bytes = goomba 43608 + rom 1048576   True
@@ -58,6 +63,11 @@ GBA title                POKEMON YELL
 game code                GMBA
 header checksum          stored=CB computed=CB     True
 GB header intact at its offset                     True
+
+Pokemon Crystal     2140760 bytes = 43608 + 2097152  True
+GB ROM appended verbatim                             True
+GBA title                PM_CRYSTAL
+header checksum          stored=DC computed=DC       True
 ```
 
 Not yet done: **booting the result on real hardware**. The writer currently
