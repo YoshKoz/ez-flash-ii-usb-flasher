@@ -1,6 +1,6 @@
 [package]
 name = "ezwriter-gui"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "GUI for the EZ-Flash II / EZ-Writer II USB GBA flasher"
 
@@ -12,5 +12,6 @@ rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 png = "0.17"
+lzo = "0.1"
 
 # rebuild

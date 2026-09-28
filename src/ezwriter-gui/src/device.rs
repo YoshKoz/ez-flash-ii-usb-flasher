@@ -281,6 +281,278 @@ pub fn wrap_gb_rom(loader: &[u8], gb: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Goomba / Goomba Color save containers
+// ---------------------------------------------------------------------------
+
+/// Magic that opens a Goomba-family SRAM dump. Goomba, PocketNES and
+/// SMSAdvance each have their own, and they share the layout downstream.
+pub const GOOMBA_STATEID: u32 = 0x57a7_31d8;
+pub const POCKETNES_STATEID: u32 = 0x57a7_31d7;
+pub const SMSADVANCE_STATEID: u32 = 0x57a7_31dc;
+
+/// The GBA save area Goomba treats as its own, and the part of it that must
+/// stay free because Goomba keeps a live uncompressed copy of an 8 KB save
+/// there (`0xE000..0xFFFF`).
+pub const GOOMBA_SRAM_SIZE: usize = 65536;
+pub const GOOMBA_AVAILABLE_SIZE: usize = 57344;
+
+/// Size of the `stateheader` in goombasav: size, type, uncompressed_size,
+/// framecount, checksum, then a 32-byte title.
+pub const GOOMBA_HEADER_SIZE: usize = 48;
+
+pub const GOOMBA_STATESAVE: u16 = 0;
+pub const GOOMBA_SRAMSAVE: u16 = 1;
+pub const GOOMBA_CONFIGSAVE: u16 = 2;
+
+/// One `stateheader` found in a Goomba save.
+///
+/// Layout and rules are taken from goombasav's `goombasav.h` / `goombasav.c`
+/// (GPL-2.0-or-later), which is the reference implementation used by the Goomba
+/// Save Manager. All multi-byte fields are little endian.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoombaSave {
+    /// Byte offset of the header inside the dump.
+    pub offset: usize,
+    /// `GOOMBA_STATESAVE`, `GOOMBA_SRAMSAVE` or `GOOMBA_CONFIGSAVE`.
+    pub kind: u16,
+    /// Header plus payload, as stored.
+    pub size: u16,
+    /// Goomba Color stores the real size here; classic Goomba stores the
+    /// *compressed* size instead, which is why `goombasav` compares the two.
+    pub uncompressed_size: u32,
+    pub framecount: u32,
+    /// ROM checksum. For a save record this is at offset 12; note a config
+    /// record has `sram_checksum` at offset **8** and `zero` here, because it
+    /// carries four single-byte fields where a save record has
+    /// `uncompressed_size`. Use [`goomba_config_checksum`] for that one.
+    pub checksum: u32,
+    pub title: String,
+}
+
+fn le16(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
+
+fn le32(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+
+/// True when a dump opens with one of the Goomba-family magic values.
+pub fn goomba_is_save(data: &[u8]) -> bool {
+    data.len() >= 4
+        && matches!(
+            le32(data, 0),
+            GOOMBA_STATEID | POCKETNES_STATEID | SMSADVANCE_STATEID
+        )
+}
+
+/// goombasav's `stateheader_plausible`: the type must be one of 0, 1, 2 or 5,
+/// the size must cover the header, and a non-config record must declare a
+/// non-zero uncompressed size.
+fn goomba_header_plausible(data: &[u8], off: usize) -> bool {
+    if off + GOOMBA_HEADER_SIZE > data.len() {
+        return false;
+    }
+    let kind = le16(data, off + 2);
+    if kind == 3 || kind == 4 || kind > 5 {
+        return false;
+    }
+    if (le16(data, off) as usize) < GOOMBA_HEADER_SIZE {
+        return false;
+    }
+    kind == GOOMBA_CONFIGSAVE || le32(data, off + 4) != 0
+}
+
+/// goombasav's `stateheader_first`: the first header may sit after a 4-byte
+/// magic, or at offset 0 when the magic is absent.
+fn goomba_first_header(data: &[u8]) -> Option<usize> {
+    let start = if goomba_is_save(data) { 4 } else { 0 };
+    goomba_header_plausible(data, start).then_some(start)
+}
+
+/// Walk the state headers in a Goomba save.
+///
+/// Records are variable length and chained by their own `size` field, exactly
+/// as `stateheader_advance` walks them, so a record that is not plausible ends
+/// the scan rather than being skipped.
+pub fn goomba_scan_saves(data: &[u8]) -> Vec<GoombaSave> {
+    let mut out = Vec::new();
+    let Some(mut off) = goomba_first_header(data) else {
+        return out;
+    };
+    while goomba_header_plausible(data, off) && out.len() < 63 {
+        let size = le16(data, off);
+        out.push(GoombaSave {
+            offset: off,
+            kind: le16(data, off + 2),
+            size,
+            uncompressed_size: le32(data, off + 4),
+            framecount: le32(data, off + 8),
+            checksum: le32(data, off + 12),
+            title: String::from_utf8_lossy(&data[off + 16..off + 48])
+                .trim_end_matches('\0')
+                .trim()
+                .to_string(),
+        });
+        off += size as usize;
+    }
+    out
+}
+
+/// The checksum recorded in the configuration record, or 0 when there is none.
+///
+/// Non-zero means Goomba holds fresher data in `0xE000..0xFFFF` than the
+/// compressed record does — goombasav calls such a file "unclean" and refuses
+/// to extract from it until it has been cleaned.
+pub fn goomba_config_checksum(data: &[u8]) -> u32 {
+    goomba_scan_saves(data)
+        .into_iter()
+        .find(|s| s.kind == GOOMBA_CONFIGSAVE)
+        .map_or(0, |s| le32(data, s.offset + 8))
+}
+
+/// The live uncompressed 8 KB Goomba keeps at `0xE000..0xFFFF`, if present.
+pub fn goomba_live_sram(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < GOOMBA_SRAM_SIZE {
+        return None;
+    }
+    Some(&data[GOOMBA_AVAILABLE_SIZE..GOOMBA_SRAM_SIZE])
+}
+
+/// Decompress the Game Boy SRAM out of one Goomba save record.
+///
+/// The payload is LZO1X, which is why `lzo` is a dependency. goombasav
+/// decompresses into a full 64 KB buffer and lets LZO report the real length;
+/// this does the same.
+///
+/// Refuses when the file is "unclean" (the live region holds newer data than
+/// the record), matching goombasav — silently returning stale save data is
+/// exactly the failure mode worth avoiding. Use [`goomba_live_sram`] for that
+/// case.
+pub fn goomba_extract_save(data: &[u8], record: &GoombaSave) -> Result<Vec<u8>> {
+    if record.kind != GOOMBA_SRAMSAVE && record.kind != GOOMBA_STATESAVE {
+        bail!("Goomba record at 0x{:X} is not a save", record.offset);
+    }
+    let checksum = goomba_config_checksum(data);
+    if checksum != 0 && checksum == record.checksum {
+        bail!(
+            "Goomba save is 'unclean': the newest data is in the live 0xE000 region, \
+             not in this record. Press L+R in Goomba to flush it first."
+        );
+    }
+
+    let start = record.offset + GOOMBA_HEADER_SIZE;
+    let end = record.offset + record.size as usize;
+    if end > data.len() || start > end {
+        bail!(
+            "Goomba record at 0x{:X} runs past the end of the dump",
+            record.offset
+        );
+    }
+    let out = lzo::decompress(&data[start..end], GOOMBA_SRAM_SIZE)
+        .map_err(|e| anyhow::anyhow!("LZO decompression failed: {e:?}"))?;
+    if out.is_empty() {
+        bail!(
+            "Goomba record at 0x{:X} decompressed to nothing",
+            record.offset
+        );
+    }
+    Ok(out)
+}
+
+/// Extract every Game Boy save inside a Goomba container and write them out.
+///
+/// A Goomba cartridge holds one SRAM record per game, so this writes one file
+/// per record beside the dump: `<stem>.gb.sav` when there is only one, and
+/// `<stem>.<title>.sav` when the cartridge holds several games.
+///
+/// Records that cannot be extracted are reported rather than skipped, because
+/// the usual reason is an "unclean" file whose newest data has not been
+/// flushed out of Goomba's live region yet.
+pub fn dump_goomba_saves(path: &std::path::Path, data: &[u8]) -> Result<String> {
+    let saves: Vec<GoombaSave> = goomba_scan_saves(data)
+        .into_iter()
+        .filter(|s| s.kind == GOOMBA_SRAMSAVE || s.kind == GOOMBA_STATESAVE)
+        .collect();
+    if saves.is_empty() {
+        bail!("this looks like a Goomba save but holds no game records");
+    }
+
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "save".to_string());
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let many = saves.len() > 1;
+
+    let mut written = Vec::new();
+    let mut problems = Vec::new();
+    for rec in &saves {
+        let title = if rec.title.is_empty() {
+            "unknown".to_string()
+        } else {
+            rec.title.clone()
+        };
+        match goomba_extract_save(data, rec) {
+            Ok(sram) => {
+                let safe: String = title
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                let name = if many {
+                    format!("{stem}.{safe}.sav")
+                } else {
+                    format!("{stem}.gb.sav")
+                };
+                let out = dir.join(&name);
+                std::fs::write(&out, &sram)
+                    .map_err(|e| anyhow::anyhow!("could not write {}: {e}", out.display()))?;
+                written.push(format!(
+                    "{title} -> {} ({} bytes)",
+                    out.display(),
+                    sram.len()
+                ));
+            }
+            Err(e) => {
+                // The usual cause is an unclean file: Goomba still has newer
+                // data in its live region that was never flushed into a record.
+                // Hand that over rather than nothing, clearly labelled.
+                match goomba_live_sram(data) {
+                    Some(live) => {
+                        let out = dir.join(format!("{stem}.live-region.bin"));
+                        match std::fs::write(&out, live) {
+                            Ok(()) => problems.push(format!(
+                                "{title}: {e} — Goomba's live {} byte region saved to {} instead",
+                                live.len(),
+                                out.display()
+                            )),
+                            Err(werr) => problems.push(format!("{title}: {e} ({werr})")),
+                        }
+                    }
+                    None => problems.push(format!("{title}: {e}")),
+                }
+            }
+        }
+    }
+
+    if written.is_empty() {
+        bail!(
+            "no Game Boy save could be extracted: {}",
+            problems.join("; ")
+        );
+    }
+    let mut msg = format!(
+        "[OK] Goomba save: extracted {} game save(s) — {}",
+        written.len(),
+        written.join(", ")
+    );
+    if !problems.is_empty() {
+        msg.push_str(&format!(" | not extracted: {}", problems.join("; ")));
+    }
+    Ok(msg)
+}
+
 pub struct GameDBEntry {
     pub code: &'static str,
     pub title: &'static str,
@@ -2467,6 +2739,137 @@ mod tests {
         );
         assert_eq!(gb_rom_title(&fake_gb_rom(b"TETRIS")), "TETRIS");
         assert_eq!(gb_rom_title(&[]), "");
+    }
+
+    // --- Goomba save container ------------------------------------------------
+
+    /// Build one LZO1X stream: a literal run then the end-of-stream marker.
+    /// `0x11 0x00 0x00` is LZO1X's EOF (t >= 16, `t & 8 == 0`, zero offset),
+    /// which is why a hand-built stream is only a few bytes longer than its
+    /// payload.
+    fn lzo_literals(payload: &[u8]) -> Vec<u8> {
+        assert!(
+            (4..=238).contains(&payload.len()),
+            "keep the run in one byte"
+        );
+        let mut v = vec![17 + payload.len() as u8];
+        v.extend_from_slice(payload);
+        v.extend_from_slice(&[0x11, 0x00, 0x00]);
+        v
+    }
+
+    /// A Goomba save: 4-byte magic, one SRAM record, then a config record.
+    fn fake_goomba_save(title: &str, sram: &[u8]) -> Vec<u8> {
+        let compressed = lzo_literals(sram);
+        let mut v = Vec::new();
+        v.extend_from_slice(&GOOMBA_STATEID.to_le_bytes());
+
+        // save record
+        let size = (GOOMBA_HEADER_SIZE + compressed.len()) as u16;
+        v.extend_from_slice(&size.to_le_bytes());
+        v.extend_from_slice(&GOOMBA_SRAMSAVE.to_le_bytes());
+        v.extend_from_slice(&(sram.len() as u32).to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // framecount
+        v.extend_from_slice(&0x1234_5678u32.to_le_bytes()); // rom checksum
+        let mut t = [0u8; 32];
+        t[..title.len()].copy_from_slice(title.as_bytes());
+        v.extend_from_slice(&t);
+        v.extend_from_slice(&compressed);
+
+        // config record, "clean": 4 one-byte fields, sram_checksum at +8
+        v.extend_from_slice(&(GOOMBA_HEADER_SIZE as u16).to_le_bytes());
+        v.extend_from_slice(&GOOMBA_CONFIGSAVE.to_le_bytes());
+        v.extend_from_slice(&[0u8; 4]); // bordercolor, palettebank, misc, reserved
+        v.extend_from_slice(&0u32.to_le_bytes()); // checksum 0 = clean
+        v.extend_from_slice(&0u32.to_le_bytes()); // zero
+        let mut cfg = [0u8; 32];
+        cfg[..3].copy_from_slice(b"CFG");
+        v.extend_from_slice(&cfg);
+
+        v.resize(GOOMBA_SRAM_SIZE, 0);
+        v
+    }
+
+    #[test]
+    fn finds_and_extracts_a_goomba_save() {
+        let sram: Vec<u8> = (0..64u8).collect();
+        let dump = fake_goomba_save("POKEMON YELLOW", &sram);
+
+        assert!(goomba_is_save(&dump));
+        let saves = goomba_scan_saves(&dump);
+        assert_eq!(saves.len(), 2, "one save record and one config record");
+        assert_eq!(saves[0].kind, GOOMBA_SRAMSAVE);
+        assert_eq!(saves[0].title, "POKEMON YELLOW");
+        assert_eq!(saves[1].kind, GOOMBA_CONFIGSAVE);
+        assert_eq!(saves[1].title, "CFG");
+
+        let rec = saves.iter().find(|s| s.kind == GOOMBA_SRAMSAVE).unwrap();
+        assert_eq!(goomba_extract_save(&dump, rec).unwrap(), sram);
+    }
+
+    #[test]
+    fn picks_the_right_record_when_several_games_are_present() {
+        // Two records chained by their own size field, as the real container is.
+        let mut dump = GOOMBA_STATEID.to_le_bytes().to_vec();
+        for (title, byte) in [("POKEMON YELLOW", 0xAAu8), ("TETRIS", 0xBBu8)] {
+            let sram = vec![byte; 32];
+            let comp = lzo_literals(&sram);
+            dump.extend_from_slice(&((GOOMBA_HEADER_SIZE + comp.len()) as u16).to_le_bytes());
+            dump.extend_from_slice(&GOOMBA_SRAMSAVE.to_le_bytes());
+            dump.extend_from_slice(&(sram.len() as u32).to_le_bytes());
+            dump.extend_from_slice(&7u32.to_le_bytes());
+            dump.extend_from_slice(&(byte as u32).to_le_bytes());
+            let mut t = [0u8; 32];
+            t[..title.len()].copy_from_slice(title.as_bytes());
+            dump.extend_from_slice(&t);
+            dump.extend_from_slice(&comp);
+        }
+        dump.resize(GOOMBA_SRAM_SIZE, 0);
+
+        let saves = goomba_scan_saves(&dump);
+        assert_eq!(saves.len(), 2);
+        let tetris = saves.iter().find(|s| s.title == "TETRIS").unwrap();
+        assert_eq!(tetris.title, "TETRIS");
+        assert_eq!(
+            goomba_extract_save(&dump, tetris).unwrap(),
+            vec![0xBBu8; 32]
+        );
+    }
+
+    #[test]
+    fn refuses_to_extract_an_unclean_goomba_save() {
+        let sram: Vec<u8> = (0..64u8).collect();
+        let mut dump = fake_goomba_save("POKEMON YELLOW", &sram);
+        // Mark the config as holding newer data for this record's checksum.
+        let cfg = goomba_scan_saves(&dump)
+            .into_iter()
+            .find(|s| s.kind == GOOMBA_CONFIGSAVE)
+            .unwrap();
+        dump[cfg.offset + 8..cfg.offset + 12].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        assert_eq!(goomba_config_checksum(&dump), 0x1234_5678);
+
+        let saves = goomba_scan_saves(&dump);
+        let rec = saves.iter().find(|s| s.kind == GOOMBA_SRAMSAVE).unwrap();
+        let err = goomba_extract_save(&dump, rec).unwrap_err().to_string();
+        assert!(err.contains("unclean"), "got: {err}");
+
+        // The live region is still readable, which is what the message points at.
+        assert_eq!(goomba_live_sram(&dump).unwrap().len(), 8192);
+    }
+
+    #[test]
+    fn rejects_dumps_that_are_not_goomba_saves() {
+        assert!(!goomba_is_save(&[]));
+        assert!(!goomba_is_save(&[0u8; 64]));
+        assert!(goomba_scan_saves(&[0u8; 64]).is_empty());
+        // A plausible-looking header still needs a real payload.
+        let mut junk = GOOMBA_STATEID.to_le_bytes().to_vec();
+        junk.extend_from_slice(&[0x30, 0x00, 0x01, 0x00]); // size 48, SRAM record
+        junk.extend_from_slice(&64u32.to_le_bytes()); // uncompressed_size, must be non-zero
+        junk.extend_from_slice(&[0u8; 40]);
+        assert_eq!(goomba_scan_saves(&junk).len(), 1, "header parses");
+        let rec = goomba_scan_saves(&junk).remove(0);
+        assert!(goomba_extract_save(&junk, &rec).is_err(), "but no payload");
     }
 
     /// The markers sit megabytes into real ROMs, so exercise it at depth.

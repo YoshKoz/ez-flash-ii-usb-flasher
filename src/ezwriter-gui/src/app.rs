@@ -1318,6 +1318,23 @@ impl EzWriterApp {
                     }
                     all
                 };
+                // A Goomba container is neither a Game Boy save nor a Gen 3
+                // save: pull the GB/GBC SRAM out of it instead of validating.
+                if device::goomba_is_save(&all) {
+                    let _ = tx.send(BgCmd::Progress(format!(
+                        "Goomba save detected ({} game record(s))",
+                        device::goomba_scan_saves(&all).len()
+                    )));
+                    match device::dump_goomba_saves(&path, &all) {
+                        Ok(msg) => {
+                            let _ = tx.send(BgCmd::Progress(msg));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(BgCmd::Error(e.to_string()));
+                        }
+                    }
+                    return;
+                }
                 if let Err(e) = device::validate_save_dump(&all, &save_type) {
                     let _ = tx.send(BgCmd::Error(e.to_string()));
                     return;

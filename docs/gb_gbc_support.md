@@ -131,11 +131,50 @@ GB ROM  ->  wrap (Goomba + ROM, header title, checksum)  ->  burn + read-back ve
         ->  boots and plays on original GBA hardware
 ```
 
-Still open, for the record:
+Still open: Pokemon Crystal (GBC) is wrapped and byte-verified but has not been
+burned or booted; only the GB path has been confirmed on a console.
 
-- Goomba **saves** live in the GBA cart's save area, not in the ROM — the GB SRAM
-  occupies `0xE000-0xFFFF` with compressed data and 48-byte headers elsewhere
-  (see the [format notes](https://lakora.us/gba/goomba/)). Reading a Yellow save
-  back off the cartridge is separate work.
-- Pokemon Crystal (GBC) is wrapped and byte-verified but has not been burned or
-  booted; only the GB path has been confirmed on a console.
+## Reading Game Boy saves back off the cartridge
+
+Goomba keeps Game Boy saves in the cartridge's **save** area, not in the ROM, in
+its own container. The Burn section's counterpart is Save backup: dump the save
+as usual and, if it is a Goomba container, the GB/GBC save is extracted
+automatically.
+
+The container is documented in goombasav's `goombasav.h` / `goombasav.c`
+(GPL-2.0-or-later), the library behind the Goomba Save Manager, and
+`device.rs` implements those rules:
+
+```
+offset 0    magic: D8 31 A7 57 (Goomba; PocketNES and SMSAdvance differ)
+then        chained records, each 48-byte header + payload, stepped by `size`
+              size, type, uncompressed_size, framecount, checksum, title[32]
+            type 0 = savestate, 1 = SRAM, 2 = configuration
+payload     LZO1X compressed Game Boy SRAM
+0xE000      live uncompressed 8 KB copy, kept only for 8 KB saves
+```
+
+Details that matter:
+
+- **Records are chained by their own `size` field**, not by a fixed stride, and a
+  record that fails goombasav's plausibility test ends the scan rather than
+  being skipped.
+- **A config record is laid out differently**: it has four one-byte fields where
+  a save record has `uncompressed_size`, which puts its `sram_checksum` at
+  offset **8** rather than 12. Reading offset 12 there silently yields the `zero`
+  field instead.
+- **An "unclean" file is refused.** When the config's checksum names the record,
+  Goomba still has newer data in its live `0xE000..0xFFFF` region that has not
+  been flushed, and extracting the record would hand you a stale save. The tool
+  says so and writes the live region to `<name>.live-region.bin` instead. Press
+  **L+R** in Goomba to flush and dump again.
+
+The payload is LZO1X, so this adds [`lzo`](https://crates.io/crates/lzo), a
+dependency-free pure-Rust decompressor, rather than writing one.
+
+Files are written beside the dump: `<stem>.gb.sav` when the cartridge holds one
+game, `<stem>.<TITLE>.sav` when it holds several.
+
+**Not yet exercised against a real Goomba save.** The parsing is covered by
+tests built from the documented layout, including a hand-built LZO1X stream, but
+no cartridge with a Goomba save has been read at the time of writing.

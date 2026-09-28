@@ -2,7 +2,7 @@ mod app;
 mod device;
 mod theme;
 
-pub const BUILD_STAMP: &str = "0.2.0";
+pub const BUILD_STAMP: &str = "0.2.1";
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {

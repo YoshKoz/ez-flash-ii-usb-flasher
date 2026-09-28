@@ -172,6 +172,10 @@ Confirmed on hardware: **Pokemon Yellow (GB) wraps, burns, verifies, and plays o
 an original GBA.** Pokemon Crystal (GBC) wraps and byte-verifies but has not been
 booted. The loader is `firmware/goomba.gba` and ships with the release.
 
+Goomba keeps its saves in the cartridge save area, not in the ROM. **Save backup**
+detects a Goomba container and extracts the Game Boy save out of it — see
+[docs/gb_gbc_support.md](docs/gb_gbc_support.md).
+
 Where the ROM is placed, and why nothing needs aligning:
 [docs/gb_gbc_support.md](docs/gb_gbc_support.md).
 
