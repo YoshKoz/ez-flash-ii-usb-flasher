@@ -87,6 +87,9 @@ pub struct EzWriterApp {
     /// Box art for the cartridge currently detected, once it has been fetched.
     banner: Option<egui::TextureHandle>,
     banner_status: String,
+    /// Output list: every status, progress and error line, oldest first.
+    log: Vec<String>,
+    log_start: std::time::Instant,
     rom_path: PathBuf,
     save_path: PathBuf,
     /// Write ROM tab state.
@@ -116,6 +119,8 @@ impl Default for EzWriterApp {
             nintendo_logo: Vec::new(),
             banner: None,
             banner_status: String::new(),
+            log: Vec::new(),
+            log_start: std::time::Instant::now(),
             rom_path: PathBuf::new(),
             save_path: PathBuf::new(),
             write_rom_path: PathBuf::new(),
@@ -137,7 +142,10 @@ impl eframe::App for EzWriterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                BgCmd::Status(s) => self.status_text = s,
+                BgCmd::Status(s) => {
+                    self.log_push(&s);
+                    self.status_text = s;
+                }
                 BgCmd::Header(h) => {
                     self.cart_header = *h;
                     let info = self
@@ -182,6 +190,7 @@ impl eframe::App for EzWriterApp {
                     }
                 },
                 BgCmd::Progress(s) => {
+                    self.log_push(&s);
                     self.progress = s;
                 }
                 BgCmd::DumpProgress {
@@ -237,6 +246,7 @@ impl eframe::App for EzWriterApp {
                     );
                 }
                 BgCmd::Error(e) => {
+                    self.log_push(&format!("Error: {e}"));
                     self.progress = format!("Error: {e}");
                     self.cart_header = None;
                     self.nintendo_logo.clear();
@@ -294,6 +304,31 @@ impl eframe::App for EzWriterApp {
             });
         });
 
+        // Output list. The original's is an embedded browser pointed at the
+        // vendor site, so it shows whatever that serves (a Cloudflare challenge,
+        // the last time it was opened) rather than anything about the cartridge.
+        // This one is the program's own log.
+        let mut log = std::mem::take(&mut self.log);
+        egui::Panel::bottom("output").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong("Output list");
+                ui.separator();
+                if ui.button("Clear").clicked() {
+                    log.clear();
+                }
+                ui.label(format!("{} line(s)", log.len()));
+            });
+            egui::ScrollArea::vertical()
+                .max_height(150.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for line in &log {
+                        ui.monospace(line);
+                    }
+                });
+        });
+        self.log = log;
+
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.allocate_ui_with_layout(
@@ -333,6 +368,22 @@ impl eframe::App for EzWriterApp {
 }
 
 impl EzWriterApp {
+    /// Append a line to the Output list, prefixed with elapsed time.
+    fn log_push(&mut self, msg: &str) {
+        const MAX_LINES: usize = 500;
+        let secs = self.log_start.elapsed().as_secs();
+        self.log.push(format!(
+            "[{:02}:{:02}:{:02}] {msg}",
+            secs / 3600,
+            (secs / 60) % 60,
+            secs % 60
+        ));
+        if self.log.len() > MAX_LINES {
+            let excess = self.log.len() - MAX_LINES;
+            self.log.drain(..excess);
+        }
+    }
+
     fn detect(&self, tx: Sender<BgCmd>) {
         thread::spawn(move || match device::detect_mode() {
             device::DeviceMode::Bootloader => {
