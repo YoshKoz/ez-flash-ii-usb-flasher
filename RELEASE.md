@@ -27,6 +27,25 @@ use those command names.
 - [ ] Attach screenshots or terminal output to the Reddit post if available.
 - [x] Rename the GitHub repo slug to `ez-flash-ii-usb-flasher`.
 
+## v0.2.0 Checklist
+
+Everything below was done against the physical writer and cartridge during this cycle.
+
+- [x] `cargo fmt --check`, `clippy -D warnings`, `cargo test` clean (37 tests).
+- [x] Full-cartridge writes: 256 KB, 512 KB, 1.45 MB and 16 MB burned and verified.
+- [x] Read-back wrap at 128 KB found and fixed (per-32 KB re-arm, 20 ms settle).
+- [x] `rom-verify` saves `<input>.readback.bin` on mismatch instead of only reporting it.
+- [x] Trim ROM verified on hardware (1048576 -> 786432 bytes).
+- [x] IPS patch verified on hardware (2 records, 20 bytes, RLE + literal).
+- [x] *Skip erase* verified by writing `0xFF` over `0x5A` and confirming the bits stayed set.
+- [x] *Reset Cartridge Flash* fixed (was a pre-capture command form, and opened without claiming).
+- [x] Eject Cartridge Safely verified; the 8051 is deliberately left running.
+- [x] SDK save-library detection, agreeing with GAME_DB on FireRed (`FLASH 128K`).
+- [x] Game Boy ROM wrapping: Pokemon Yellow burned, read back verified, **boots on an original GBA**.
+- [x] Game Boy Color wrapping byte-verified (Pokemon Crystal) — not yet booted on hardware.
+- [ ] Boot a GBC image on real hardware.
+- [ ] Read a Goomba save back off the cartridge (saves live in the GBA save area, not the ROM).
+
 ## v0.1.2 Checklist
 
 Automated gates, run locally and in CI:

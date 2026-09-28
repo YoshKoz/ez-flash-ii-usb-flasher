@@ -18,7 +18,8 @@ Linux, or macOS. No old Windows XP driver needed.
 ## Quick start
 
 1. Go to **[Releases](https://github.com/YoshKoz/ez-flash-ii-usb-flasher/releases/latest)**.
-2. Download the app for your OS, plus **all** the `.bin` firmware files.
+2. Download the app for your OS, plus the firmware files (`.bin`, plus
+   `goomba.gba` if you want Game Boy support).
 3. Put everything in **one folder**.
 4. **Windows only:** install the WinUSB driver with
    [Zadig](https://zadig.akeo.ie/) — see [Windows setup](#windows-setup).
@@ -40,6 +41,8 @@ That is the whole setup for a normal backup. The rest of this page is detail.
 | Back up a save | BAK Saver tab / `save-read` | Yes |
 | Restore a save | Write Saver tab / `save-write` | Be careful |
 | Write a ROM (erase + write) | Burn tab / `rom-write` | Works, offset 0 up to the full 32 MB — see [Writing a ROM](#writing-a-rom) |
+| Run a Game Boy / GBC ROM on a GBA | Burn tab / wrap + `rom-write` | Works — see [Game Boy ROMs](#game-boy-and-game-boy-color-roms) |
+| Find out a ROM's save hardware | Burn tab (on file select) | Yes |
 
 Read-only tasks (everything except writing) are the safe, supported path.
 If you only want backups, you never need the risky commands.
@@ -63,16 +66,23 @@ run Zadig again and bind WinUSB to the second entry too. It may be named
 
 ## The GUI
 
-Six tabs along the top, laid out like the original EZ Client:
+Six sections in a sidebar, with an icon toolbar across the top for the common
+actions — Open ROM, Clear, Burn, Read ROM, Write Saver, BAK Saver, Refresh — in
+the spirit of the original EZ Client but with a modern Fluent look:
 
-| Tab | What it does |
-|-----|--------------|
-| **Device** | Find the writer and load its firmware |
-| **Show ROM Info** | Show the game title, code, save type, and ROM size |
+| Section | What it does |
+|---------|--------------|
+| **Device** | Find the writer, load its firmware, eject the cartridge safely |
+| **Cartridge** | Show the game title, code, box art, save hardware, and ROM size |
 | **Read ROM** | Save the cartridge ROM to a `.gba` file |
 | **Burn** | Write a `.gba` file to the cartridge (see [Writing a ROM](#writing-a-rom)) |
-| **BAK Saver** | Save the cartridge save data to a `.sav` file |
-| **Write Saver** | Put a `.sav` file back onto the cartridge |
+| **Save backup** | Save the cartridge save data to a `.sav` file |
+| **Save write** | Put a `.sav` file back onto the cartridge |
+
+The **Output list** along the bottom records what the app actually did, so a step
+that fails is visible instead of silent. The window draws its own title bar, uses
+Segoe UI Variable and Segoe Fluent Icons (falling back to Segoe UI / Segoe MDL2
+on Windows 10), and needs no bundled fonts.
 
 ## Command line
 
@@ -130,6 +140,8 @@ write and verify, stable across repeated reads. Current limits:
   writing, which removes whole 256 KB blocks and so most of the write time) and
   apply an **IPS patch** before writing. Both are verified on hardware. *Skip
   erase* writes without erasing, for a region that is already blank.
+- Selecting a `.gb` or `.gbc` file wraps it with the Goomba emulator so it can
+  run on the cartridge — see [Game Boy ROMs](#game-boy-and-game-boy-color-roms).
 - The firmware has to be loaded first. From bootloader mode the CLI does that
   itself — no VM needed:
   ```console
@@ -141,6 +153,34 @@ write and verify, stable across repeated reads. Current limits:
 
 Details: [docs/rom_write_status.md](docs/rom_write_status.md) and
 [docs/session_2026-09-27_capture_and_write_findings.md](docs/session_2026-09-27_capture_and_write_findings.md).
+
+### Game Boy and Game Boy Color ROMs
+
+A GBA cannot execute a Game Boy ROM, so a `.gb`/`.gbc` file is wrapped with the
+**Goomba** emulator before writing: `goomba.gba` is concatenated with your ROM,
+the GBA header title becomes the game's name, and the header checksum is
+recalculated. Selecting a Game Boy ROM on the Burn section does this
+automatically — it writes `<name>.goomba.gba` next to your ROM, reports the
+sizes, and uses that image as the write source. The rest of the burn path is
+unchanged.
+
+```console
+# GUI: Burn -> Select ROM File... -> pick a .gb or .gbc, then ERASE + WRITE ROM
+```
+
+Confirmed on hardware: **Pokemon Yellow (GB) wraps, burns, verifies, and plays on
+an original GBA.** Pokemon Crystal (GBC) wraps and byte-verifies but has not been
+booted. The loader is `firmware/goomba.gba` and ships with the release.
+
+Where the ROM is placed, and why nothing needs aligning:
+[docs/gb_gbc_support.md](docs/gb_gbc_support.md).
+
+> **Game Boy cartridges cannot be dumped with this hardware.** The writer drives
+> the GBA cartridge bus, while a Game Boy cartridge is 5 V with MBC banking and
+> needs the GBA SoC switched into GBC mode — which an external writer cannot do.
+> The original EZ Client never had this either. Use a dedicated dumper (GBxCart
+> RW, Epilogue GB Operator, BennVenn Joey). Evidence and detail:
+> [docs/ezclient_feature_gaps.md](docs/ezclient_feature_gaps.md).
 
 ### Speed
 
@@ -159,7 +199,7 @@ and for the `bench` command that measures it on your unit.
 | WinUSB install seems to do nothing on a second run | It was already applied | Re-run Zadig, `List All Devices`, confirm both IDs show WinUSB |
 | One cartridge backs up corrupt, another is fine | The cartridge, not the writer | Run `dump --verify` twice. Results that differ = unstable cartridge. Same-but-wrong = bootleg/repro cart |
 | `save-id` shows no change | Save chip is not JEDEC-readable | Typical of bootleg/repro PCBs; their saves cannot be dumped reliably |
-| "unrecognised save type" | Game code is not in the built-in list | On purpose — guessing can lock the cart until you replug. Run `save-id`, then `save-read -t f\|s\|e --output <file>` |
+| "unrecognised save type" | Game code is not in the built-in list and no ROM is selected | Selecting the game's ROM on the Burn section detects its save hardware from the ROM's SDK save-library marker, which also unblocks the save sections. Otherwise guessing can lock the cart until you replug: run `save-id`, then `save-read -t f\|s\|e --output <file>` |
 
 ## Safety
 
@@ -214,7 +254,7 @@ Full protocol notes: [docs/protocol_notes.md](docs/protocol_notes.md).
 .
 |-- src/ezwriter-cli/       Command-line tool
 |-- src/ezwriter-gui/       Desktop app
-|-- firmware/               AN2131 firmware + loader tables
+|-- firmware/               AN2131 firmware, loader tables, goomba.gba
 |-- docs/                   Protocol notes and driver analysis
 |-- driver/winusb-inf/      Optional WinUSB INF files
 `-- SAFETY.md               Write-operation safety guide
