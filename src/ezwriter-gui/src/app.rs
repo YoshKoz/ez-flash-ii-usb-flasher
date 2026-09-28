@@ -393,6 +393,22 @@ impl EzWriterApp {
                 }
             });
         }
+        ui.separator();
+        ui.heading("Eject");
+        ui.label("Ends the cartridge session and parks the flash so the cartridge can be removed safely:");
+        if ui.button("[E] Eject Cartridge Safely").clicked() {
+            let tx = self.tx.clone();
+            self.progress = "Ejecting...".into();
+            thread::spawn(move || match device::eject_safely() {
+                Ok(msg) => {
+                    let _ = tx.send(BgCmd::Status(msg));
+                    let _ = tx.send(BgCmd::Header(Box::new(None)));
+                }
+                Err(e) => {
+                    let _ = tx.send(BgCmd::Error(e.to_string()));
+                }
+            });
+        }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(2));
         ui.separator();

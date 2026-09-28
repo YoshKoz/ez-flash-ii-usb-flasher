@@ -502,6 +502,57 @@ pub fn reset_jedec(handle: &DeviceHandle<GlobalContext>) {
     }
 }
 
+/// Park the writer so the cartridge can be physically removed.
+///
+/// A cartridge is only safe to pull once nothing is driving its bus, so this:
+///
+/// 1. ends any open cartridge session (`0x06`),
+/// 2. returns the flash to read-array mode ([`reset_jedec`]),
+/// 3. clears endpoint halts and releases the claimed interface.
+///
+/// It deliberately does **not** halt the 8051. Doing so silences the writer but
+/// does not de-enumerate it (the device stays `0548:1005`, so the LED does not
+/// go out either) and leaves every later command timing out until the CPU is
+/// released with a vendor write to CPUCS. Parking the flash and releasing the
+/// interface is what actually makes removal safe.
+pub fn eject_safely() -> Result<String> {
+    let had_writer = find_device(EZWRITER_VID, EZWRITER_PID).is_ok();
+
+    if had_writer {
+        let (device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+        // Best effort: a session may or may not still be open.
+        let _ = handle.write_bulk(CMD_EP, &[0x06], TIMEOUT);
+        std::thread::sleep(Duration::from_millis(50));
+        reset_jedec(&handle);
+        for ep in 0x01u8..=0x07u8 {
+            let _ = handle.clear_halt(ep);
+            let _ = handle.clear_halt(ep | 0x80);
+        }
+        if let Ok(config) = device.active_config_descriptor() {
+            for iface in config.interfaces() {
+                for d in iface.descriptors() {
+                    let _ = handle.release_interface(d.interface_number());
+                }
+            }
+        }
+        drop(handle);
+    }
+
+    let mode = match detect_mode() {
+        DeviceMode::Active => "active (0548:1005)",
+        DeviceMode::Bootloader => "in bootloader (0547:2131)",
+        DeviceMode::None => "off the bus",
+    };
+    let what = if had_writer {
+        "Session ended, flash parked in read-array mode, interface released"
+    } else {
+        "No active writer was running"
+    };
+    Ok(format!(
+        "{what}. Device is {mode}; the cartridge is safe to remove."
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // CartSession — streaming dump
 // ---------------------------------------------------------------------------

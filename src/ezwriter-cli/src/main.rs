@@ -269,6 +269,13 @@ enum Commands {
     SessionInit,
     /// Reload firmware: CPUCS reset → OS power cycle if needed → auto init-exact
     Reload,
+    /// Park the writer so the cartridge can be removed safely
+    ///
+    /// Ends any open cartridge session, returns the flash to read-array mode,
+    /// releases the USB interface and halts the 8051 so the firmware stops
+    /// driving the cartridge bus. The writer re-enumerates as the bootloader
+    /// (`0547:2131`) and its LED should go out; run `reload` to use it again.
+    Eject,
     /// Bulk endpoint test
     BulkTest,
     /// Probe the ROM flash command path with an explicit packet (diagnostic)
@@ -3383,6 +3390,63 @@ fn power_cycle_macos(handle: &DeviceHandle<GlobalContext>) -> Result<()> {
     Ok(())
 }
 
+/// Park the writer so the cartridge can be removed safely.
+///
+/// Nothing is safe to pull while something drives the cartridge bus, so this
+/// ends any open session, returns the flash to read-array mode and releases the
+/// interface. It deliberately does not halt the 8051: that silences the writer
+/// but does not de-enumerate it, so the LED stays on anyway and every later
+/// command times out until the CPU is released again.
+fn cmd_eject() -> Result<()> {
+    if find_device(EZWRITER_VID, EZWRITER_PID).is_ok() {
+        let (device, _desc) = find_device(EZWRITER_VID, EZWRITER_PID)?;
+        let handle = device.open()?;
+        let config = device.active_config_descriptor()?;
+        for iface in config.interfaces() {
+            for d in iface.descriptors() {
+                let _ = handle.claim_interface(d.interface_number());
+            }
+        }
+        for ep in 0x01u8..=0x07u8 {
+            let _ = handle.clear_halt(ep);
+            let _ = handle.clear_halt(ep | 0x80);
+        }
+
+        // End any open cartridge session (best effort: there may not be one).
+        let _ = handle.write_bulk(CMD_EP, &[0x06], TIMEOUT);
+        std::thread::sleep(Duration::from_millis(50));
+
+        // JEDEC software reset puts the flash back in read-array mode.
+        for (cb, a) in [(0xAAu8, 0xAAAAu16), (0x55, 0x5554), (0xF0, 0xAAAA)] {
+            let da = a / 2;
+            let c = [cb, (da & 0xFF) as u8, ((da >> 8) & 0xFF) as u8, 0x00];
+            let _ = handle.write_bulk(CMD_EP, &c, Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        if let Ok(cfg) = device.active_config_descriptor() {
+            for iface in cfg.interfaces() {
+                for d in iface.descriptors() {
+                    let _ = handle.release_interface(d.interface_number());
+                }
+            }
+        }
+        drop(handle);
+        println!("Session ended, flash parked in read-array mode, interface released.");
+    } else {
+        println!("No active writer was running.");
+    }
+
+    if find_device(BOOTLOADER_VID, BOOTLOADER_PID).is_ok() {
+        println!("Device is in bootloader (0547:2131). The cartridge is safe to remove.");
+    } else if find_device(EZWRITER_VID, EZWRITER_PID).is_ok() {
+        println!("Device is active (0548:1005). The cartridge is safe to remove.");
+    } else {
+        println!("Device is off the bus. The cartridge is safe to remove.");
+    }
+    Ok(())
+}
+
 fn cmd_reload() -> Result<()> {
     // Step 1: try CPUCS vendor request reset while in active mode
     // This works if the USB auto-vector ISR is still running despite the 8051 being stuck
@@ -3545,6 +3609,7 @@ fn main() -> Result<()> {
             !no_confirm,
         )?,
         Commands::SaveProbe { count } => cmd_save_probe(count)?,
+        Commands::Eject => cmd_eject()?,
         Commands::CartRead {
             addr,
             count,
