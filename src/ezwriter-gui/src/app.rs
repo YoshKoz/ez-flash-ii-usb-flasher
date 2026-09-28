@@ -104,6 +104,10 @@ pub struct EzWriterApp {
     write_rom_trim: bool,
     /// Optional IPS patch applied to the image before writing.
     ips_path: PathBuf,
+    /// Save hardware the selected ROM was built for, from its SDK save-library
+    /// marker. Shown on the Burn tab and used as a fallback by the save tabs
+    /// when the cartridge's game code is not in the built-in database.
+    rom_save_type: Option<&'static str>,
     progress: String,
     progress_value: f32,
     /// Read every ROM chunk twice and require agreement. Catches the stale-EP2
@@ -129,6 +133,7 @@ impl Default for EzWriterApp {
             rom_path: PathBuf::new(),
             save_path: PathBuf::new(),
             write_rom_path: PathBuf::new(),
+            rom_save_type: None,
             write_rom_addr: "0x000000".into(),
             write_rom_delay_ms: 50,
             write_rom_no_erase: false,
@@ -355,6 +360,27 @@ impl eframe::App for EzWriterApp {
 }
 
 impl EzWriterApp {
+    /// Save hardware to act on.
+    ///
+    /// The cartridge's own type when its game code is in the built-in database,
+    /// otherwise the save library detected from the selected ROM's SDK marker.
+    /// That fallback is what lets the save tabs work on a game `GAME_DB` does
+    /// not know — the case that previously refused with "UNKNOWN".
+    fn effective_save_type(&self) -> String {
+        if let Some(hdr) = &self.cart_header
+            && device::is_known_save_type(&hdr.save_type)
+        {
+            return hdr.save_type.clone();
+        }
+        match self.rom_save_type {
+            Some(t) => t.to_string(),
+            None => self
+                .cart_header
+                .as_ref()
+                .map_or_else(|| "UNKNOWN".to_string(), |h| h.save_type.clone()),
+        }
+    }
+
     /// Append a line to the Output list, prefixed with elapsed time.
     fn log_push(&mut self, msg: &str) {
         const MAX_LINES: usize = 500;
@@ -660,6 +686,12 @@ impl EzWriterApp {
                     .add_filter("All Files", &["*"])
                     .pick_file()
             {
+                // Detect the ROM's save library here rather than at burn time:
+                // the markers sit megabytes in, so this is a full read, and
+                // doing it on selection keeps the burn itself uninterrupted.
+                self.rom_save_type = std::fs::read(&path)
+                    .ok()
+                    .and_then(|data| device::detect_saver_from_rom(&data));
                 self.write_rom_path = path;
             }
             ui.label(self.write_rom_path.display().to_string());
@@ -670,12 +702,16 @@ impl EzWriterApp {
                 .map(|m| m.len())
                 .unwrap_or(0);
             ui.label(format!("File size: {size} bytes ({} KB)", size / 1024));
-            if size > 0x10000 {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 170, 0),
-                    "(!) Only the first 64 KB (bank 0) can be written today; a larger file \
-                     will be refused rather than risk the wrong bank.",
-                );
+            match self.rom_save_type {
+                Some(t) => {
+                    ui.label(format!(
+                        "Save hardware: {t} ({} KB), from the ROM's SDK save-library marker",
+                        device::save_size_bytes(t) / 1024
+                    ));
+                }
+                None => {
+                    ui.label("Save hardware: no SDK save-library marker found in this ROM");
+                }
             }
         }
 
@@ -848,10 +884,7 @@ impl EzWriterApp {
         if !self.save_path.as_os_str().is_empty() && ui.button("[v] Dump Save").clicked() {
             let path = self.save_path.clone();
             let tx = self.tx.clone();
-            let save_type = self
-                .cart_header
-                .as_ref()
-                .map_or("FLASH 128K".to_string(), |h| h.save_type.clone());
+            let save_type = self.effective_save_type();
             let confirm = self.confirm_chunks;
             // Show the progress bar immediately; the worker drives it via
             // SaveReadProgress messages.
@@ -946,7 +979,17 @@ impl EzWriterApp {
         ui.separator();
         if let Some(ref hdr) = self.cart_header {
             ui.label(format!("Current cart: {} [{}]", hdr.title, hdr.code));
-            ui.label(format!("Save type: {}", hdr.save_type));
+            let effective = self.effective_save_type();
+            if device::is_known_save_type(&hdr.save_type) {
+                ui.label(format!("Save type: {}", hdr.save_type));
+            } else if let Some(t) = self.rom_save_type {
+                ui.label(format!(
+                    "Save type: {t} — from the selected ROM's SDK save-library marker \
+                     (the cartridge's game code is not in the database)"
+                ));
+            } else {
+                ui.label(format!("Save type: {effective}"));
+            }
         } else {
             ui.label("(!) No cartridge detected — detect in Cart Info tab first");
         }
@@ -967,10 +1010,7 @@ impl EzWriterApp {
             if ui.button("[w] Write Save to Cartridge").clicked() {
                 let path = self.save_path.clone();
                 let tx = self.tx.clone();
-                let save_type = self
-                    .cart_header
-                    .as_ref()
-                    .map_or("FLASH 128K".to_string(), |h| h.save_type.clone());
+                let save_type = self.effective_save_type();
                 thread::spawn(move || {
                     let data = match std::fs::read(&path) {
                         Ok(d) => d,

@@ -144,6 +144,44 @@ pub fn save_size_bytes(save_type: &str) -> usize {
     }
 }
 
+/// Detect a cartridge's save hardware from the SDK save library the ROM was
+/// linked against.
+///
+/// Nintendo's GBA SDK embeds a version string for whichever save library the
+/// game uses, and that string is the signal EZClient's
+/// `CRomManager::SaverPatch` keys on (`patchDLL.dll`, `FindMotif` calls at
+/// `0x100030AF` / `0x100030D6` / `0x1000347F` / `0x100036CB` / `0x10003804`).
+/// The marker bytes and the sizes are taken from those call sites and the
+/// stores that follow them:
+///
+/// | Marker | Bytes | Save | Size |
+/// |---|---|---|---|
+/// | `SRAM_` | `53 52 41 4D 5F` | SRAM | `0x8000` (`0x100030BE`) |
+/// | `EEPROM_V` | `45 45 50 52 4F 4D 5F 56` | EEPROM | `0x2000` (`0x100030EF`) |
+/// | `FLASH_V` | `46 4C 41 53 48 5F 56` | FLASH | `0x10000` (`0x100034A1`) |
+/// | `FLASH512_V` | `46 4C 41 53 48 35 31 32 5F 56` | FLASH | `0x10000` (`0x100036E7`) |
+/// | `FLASH1M_V` | `46 4C 41 53 48 31 4D 5F 56` | FLASH | `0x20000` (`0x10003820`) |
+///
+/// Returns the canonical save-type string the rest of the GUI uses, or `None`
+/// when no marker is present. Note the markers sit deep in real ROMs — 7.3 MB
+/// into FireRed, 10 MB into Emerald — so this wants the whole image, not a
+/// header read.
+pub fn detect_saver_from_rom(rom: &[u8]) -> Option<&'static str> {
+    // Most specific first. None of these is a substring of another, but keeping
+    // the long ones ahead means a future addition cannot silently shadow them.
+    const MARKERS: [(&[u8], &str); 5] = [
+        (b"FLASH1M_V", "FLASH 128K"),
+        (b"FLASH512_V", "FLASH 64K"),
+        (b"FLASH_V", "FLASH 64K"),
+        (b"EEPROM_V", "EEPROM 8K"),
+        (b"SRAM_", "SRAM 32K"),
+    ];
+    MARKERS
+        .iter()
+        .find(|(needle, _)| rom.windows(needle.len()).any(|w| w == *needle))
+        .map(|(_, save_type)| *save_type)
+}
+
 pub struct GameDBEntry {
     pub code: &'static str,
     pub title: &'static str,
@@ -2227,6 +2265,50 @@ mod tests {
             "skip_erase leaves no erase writes"
         );
         assert_eq!(full.len() - skipped.len(), 8);
+    }
+
+    /// The markers sit megabytes into real ROMs, so exercise it at depth.
+    #[test]
+    fn detects_save_type_from_sdk_marker() {
+        let cases: [(&[u8], &str); 5] = [
+            (b"FLASH1M_V112", "FLASH 128K"),
+            (b"FLASH512_V111", "FLASH 64K"),
+            (b"FLASH_V111", "FLASH 64K"),
+            (b"EEPROM_V124", "EEPROM 8K"),
+            (b"SRAM_V113", "SRAM 32K"),
+        ];
+        for (marker, want) in cases {
+            let mut rom = vec![0xAAu8; 8 * 1024 * 1024];
+            let at = 7 * 1024 * 1024;
+            rom[at..at + marker.len()].copy_from_slice(marker);
+            assert_eq!(
+                detect_saver_from_rom(&rom),
+                Some(want),
+                "marker {:?} should detect {want}",
+                std::str::from_utf8(marker).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn no_save_marker_means_no_detection() {
+        assert_eq!(detect_saver_from_rom(&[]), None);
+        assert_eq!(detect_saver_from_rom(&[0u8; 64 * 1024]), None);
+    }
+
+    /// Detected strings must be usable by the save path, with the sizes EZClient
+    /// assigns at the stores listed on `detect_saver_from_rom`.
+    #[test]
+    fn detected_save_types_match_the_sizes_ez_assigns() {
+        for (save_type, size) in [
+            ("FLASH 128K", 0x20000),
+            ("FLASH 64K", 0x10000),
+            ("EEPROM 8K", 0x2000),
+            ("SRAM 32K", 0x8000),
+        ] {
+            assert!(is_known_save_type(save_type), "{save_type} must be usable");
+            assert_eq!(save_size_bytes(save_type), size, "{save_type} size");
+        }
     }
 
     #[test]

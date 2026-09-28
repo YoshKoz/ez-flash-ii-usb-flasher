@@ -12,6 +12,7 @@ Evidence for each item is from the extracted 2006 client at
 | IPS patch | `device::apply_ips` + Burn file picker |
 | Read-array reset | `device::reset_jedec` (`0x19` bus write, `0xFF`) |
 | Skip erase | `build_burn_script(.., skip_erase)` + Burn checkbox |
+| Save library detection | `device::detect_saver_from_rom` + Burn tab label, and a fallback for the save tabs |
 
 ## Saver Patch / Special ROM patch (incl. "Soft Reset") — RE in progress
 
@@ -173,9 +174,14 @@ implement them**:
    a known original). We have none of those ROMs to test against, so the writes
    could not be validated — and applying them to a different dump would corrupt
    it.
-5. **The practical benefit is small.** Saver Patch existed for odd and bootleg
-   cartridges; save-type detection is already covered by our `GAME_DB` and
-   `save_size_bytes`, which is what the GUI uses.
+5. **The useful half is already taken.** The detection half of this RE *is*
+   implemented: `device::detect_saver_from_rom` searches for the same five
+   marker strings with the same sizes, so the Burn tab reports the save
+   hardware a ROM was built for and the save tabs no longer refuse a game
+   `GAME_DB` does not know. Verified in the GUI: FireRed reports `FLASH 128K`
+   (agreeing independently with its `GAME_DB` entry) and the EZLoader image
+   reports no marker. Only the injection half is left out — and the practical
+   need for it was odd and bootleg cartridges.
 
 The reverse-engineering is complete enough to reach that conclusion with
 evidence, and that is the deliverable: the mechanism, the motif table, the
