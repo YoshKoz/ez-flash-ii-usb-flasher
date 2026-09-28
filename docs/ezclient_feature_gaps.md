@@ -140,6 +140,19 @@ the `_V` marker **with** its version suffix — then requires `[eax+9]=='1'`,
 That pins it to ROMs built against `FLASH1M_V103`. It writes the ROM through a
 path other than immediate stores, so the stores are not yet listed.
 
+### The helpers
+
+| Function | RVA | What the disassembly shows |
+|---|---|---|
+| `FindMotif` | `0x3010` | `memchr(buf,c,n)` (IAT `0x1000E0A0`) then `repe cmps` to verify the rest |
+| `FindMotif` (5-arg) | `0x4560` | same shape, one extra bound argument |
+| `HeaderValid` | `0x40F0` | no calls, no stores — flag checks only, returns bool |
+| `FillComplementCheck` | `0x4120` | `malloc` / `free` (IAT `0x1000E06C` / `0x1000E040`) plus one local call; fills the GBA header complement byte |
+| `GetSaverTypeAndSize` | `0x41F0` | 5 × `FindMotif`, both stores (`0x10004205 [ebp]=0`, `0x1000421B [esp+3Ch]=0`) are output params — the shorter detection entry point |
+| `fixCRC` | `0x46E0` | calls `CRC16` (`0x45F0`) twice |
+| `GetSaverSpacial` | `0x4720` | no calls; builds `"AND"` on the stack (`0x10004785` `'A'`, `0x1000478A` `'N'`, `0x1000478F` `'D'`) to compare against a marker |
+| `QuerySpecial` | `0x48B0` | no calls; builds `"TO "` on the stack (`0x100048D3` `'T'`, `0x100048D8` `'O'`, `0x100048DD` `' '`) |
+
 ### Why these are not being implemented
 
 The recovery is now good enough to make the call, and the answer is **not to
