@@ -343,16 +343,23 @@ impl eframe::App for EzWriterApp {
                     },
                 );
                 ui.separator();
-                // One scrolling page rather than tab-clipped panels.
+                // One scrolling page rather than tab-clipped panels. The
+                // ScrollArea inherits its parent's layout, which here is
+                // horizontal (we are inside `horizontal_top`), so the content
+                // needs an explicit vertical wrapper — without it every widget
+                // in a section lands on one very wide line and the ones past
+                // the window edge (e.g. Eject) are unreachable.
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| match self.tab {
-                        AppTab::Status => self.show_status(ui),
-                        AppTab::CartInfo => self.show_cart_info(ui),
-                        AppTab::ReadRom => self.show_read_rom(ui),
-                        AppTab::WriteRom => self.show_write_rom(ui),
-                        AppTab::ReadSave => self.show_read_save(ui),
-                        AppTab::WriteSave => self.show_write_save(ui),
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| match self.tab {
+                            AppTab::Status => self.show_status(ui),
+                            AppTab::CartInfo => self.show_cart_info(ui),
+                            AppTab::ReadRom => self.show_read_rom(ui),
+                            AppTab::WriteRom => self.show_write_rom(ui),
+                            AppTab::ReadSave => self.show_read_save(ui),
+                            AppTab::WriteSave => self.show_write_save(ui),
+                        });
                     });
             });
         });
@@ -600,7 +607,7 @@ impl EzWriterApp {
 
     fn show_read_rom(&mut self, ui: &mut egui::Ui) {
         ui.heading("Read ROM to File");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("[..] Select File...").clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Save GBA ROM As")
@@ -678,7 +685,7 @@ impl EzWriterApp {
         );
         ui.separator();
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("[..] Select ROM File...").clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Open GBA ROM")
@@ -721,7 +728,10 @@ impl EzWriterApp {
             ui.label("Inter-chunk delay (ms):");
             ui.add(egui::DragValue::new(&mut self.write_rom_delay_ms).range(0..=1000));
         });
-        ui.horizontal(|ui| {
+        // Wrapped, not a plain horizontal row: four checkboxes plus the IPS
+        // controls are wider than the content pane, and a plain row pushes the
+        // overflow off the right edge where it cannot be clicked.
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(
                 &mut self.write_rom_init,
                 "Run CPLD/bank init first (EZClient sequence)",
@@ -735,25 +745,23 @@ impl EzWriterApp {
                 &mut self.write_rom_trim,
                 "Trim ROM (strip trailing 0xFF/0x00 padding before writing)",
             );
-            ui.horizontal(|ui| {
-                if ui.button("[..] Select IPS Patch...").clicked()
-                    && let Some(path) = FileDialog::new()
-                        .set_title("Open IPS Patch")
-                        .add_filter("IPS patch", &["ips"])
-                        .add_filter("All Files", &["*"])
-                        .pick_file()
-                {
-                    self.ips_path = path;
+            if ui.button("[..] Select IPS Patch...").clicked()
+                && let Some(path) = FileDialog::new()
+                    .set_title("Open IPS Patch")
+                    .add_filter("IPS patch", &["ips"])
+                    .add_filter("All Files", &["*"])
+                    .pick_file()
+            {
+                self.ips_path = path;
+            }
+            if self.ips_path.as_os_str().is_empty() {
+                ui.label("(no IPS patch applied)");
+            } else {
+                ui.label(format!("IPS: {}", self.ips_path.display()));
+                if ui.button("Clear").clicked() {
+                    self.ips_path = PathBuf::new();
                 }
-                if self.ips_path.as_os_str().is_empty() {
-                    ui.label("(no IPS patch applied)");
-                } else {
-                    ui.label(format!("IPS: {}", self.ips_path.display()));
-                    if ui.button("Clear").clicked() {
-                        self.ips_path = PathBuf::new();
-                    }
-                }
-            });
+            }
         });
         ui.separator();
 
@@ -870,7 +878,7 @@ impl EzWriterApp {
                 );
             }
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("[..] Select File...").clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Save Save As")
@@ -993,7 +1001,7 @@ impl EzWriterApp {
         } else {
             ui.label("(!) No cartridge detected — detect in Cart Info tab first");
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("[..] Select Save File...").clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Open Save File")
