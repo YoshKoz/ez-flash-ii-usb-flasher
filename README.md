@@ -126,6 +126,10 @@ Tested on real hardware: 512 KB and a 1449956-byte image (6 x 256 KB blocks)
 write and verify, stable across repeated reads. Current limits:
 
 - Writes start at offset 0 and may span the whole 32 MB cartridge.
+- The Burn tab can **Trim ROM** (strip trailing `0xFF`/`0x00` padding before
+  writing, which removes whole 256 KB blocks and so most of the write time) and
+  apply an **IPS patch** before writing. Both are verified on hardware. *Skip
+  erase* writes without erasing, for a region that is already blank.
 - The firmware has to be loaded first. From bootloader mode the CLI does that
   itself — no VM needed:
   ```console
