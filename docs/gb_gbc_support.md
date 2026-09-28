@@ -120,5 +120,22 @@ The source ROM is a clean dump: entry point `00 C3 AB 01`, MBC5+RAM+Battery
 (`0x1B`), 1 MB (`0x05`), 32 KB RAM (`0x03`), and its GB header checksum matches
 (`0x97`).
 
-Not proven: that Goomba **boots** the game on real GBA hardware. The bytes on the
-cartridge match the image exactly, but nobody has run it on a console.
+## Confirmed booting on hardware
+
+Booted the cartridge in an original GBA: **Pokemon Yellow runs**. That closes the
+last gap — the container is not merely the documented byte layout, it is a
+working image. The chain is now verified end to end:
+
+```
+GB ROM  ->  wrap (Goomba + ROM, header title, checksum)  ->  burn + read-back verify
+        ->  boots and plays on original GBA hardware
+```
+
+Still open, for the record:
+
+- Goomba **saves** live in the GBA cart's save area, not in the ROM — the GB SRAM
+  occupies `0xE000-0xFFFF` with compressed data and 48-byte headers elsewhere
+  (see the [format notes](https://lakora.us/gba/goomba/)). Reading a Yellow save
+  back off the cartridge is separate work.
+- Pokemon Crystal (GBC) is wrapped and byte-verified but has not been burned or
+  booted; only the GB path has been confirmed on a console.
