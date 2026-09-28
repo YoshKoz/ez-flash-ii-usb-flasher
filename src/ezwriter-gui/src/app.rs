@@ -462,17 +462,12 @@ impl EzWriterApp {
         }
         if ui.button("[R] Reset Cartridge Flash").clicked() {
             let tx = self.tx.clone();
-            thread::spawn(move || {
-                match device::find_device(device::EZWRITER_VID, device::EZWRITER_PID) {
-                    Ok((dev, _)) => {
-                        if let Ok(handle) = dev.open() {
-                            device::reset_jedec(&handle);
-                        }
-                        let _ = tx.send(BgCmd::Status("Cartridge reset.".into()));
-                    }
-                    Err(_) => {
-                        let _ = tx.send(BgCmd::Status("Not in active mode.".into()));
-                    }
+            thread::spawn(move || match device::reset_cartridge() {
+                Ok(()) => {
+                    let _ = tx.send(BgCmd::Status("Cartridge reset.".into()));
+                }
+                Err(e) => {
+                    let _ = tx.send(BgCmd::Error(e.to_string()));
                 }
             });
         }

@@ -3416,13 +3416,11 @@ fn cmd_eject() -> Result<()> {
         let _ = handle.write_bulk(CMD_EP, &[0x06], TIMEOUT);
         std::thread::sleep(Duration::from_millis(50));
 
-        // JEDEC software reset puts the flash back in read-array mode.
-        for (cb, a) in [(0xAAu8, 0xAAAAu16), (0x55, 0x5554), (0xF0, 0xAAAA)] {
-            let da = a / 2;
-            let c = [cb, (da & 0xFF) as u8, ((da >> 8) & 0xFF) as u8, 0x00];
-            let _ = handle.write_bulk(CMD_EP, &c, Duration::from_millis(500));
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        // Return the flash to read-array mode: bus-write 0x00FF via cmd 0x19.
+        // This cartridge is Intel/Sharp command set, so 0xFF is the read-array
+        // reset, not the AMD-style 0xF0.
+        let _ = handle.write_bulk(CMD_EP, &[0x19, 0x00, 0x00, 0x00, 0xFF, 0x00], TIMEOUT);
+        std::thread::sleep(Duration::from_millis(20));
 
         if let Ok(cfg) = device.active_config_descriptor() {
             for iface in cfg.interfaces() {

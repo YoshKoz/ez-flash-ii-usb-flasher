@@ -492,14 +492,33 @@ fn write_chunks(handle: &DeviceHandle<GlobalContext>, chunks: &[(u16, Vec<u8>)])
     Ok(())
 }
 
+/// Return the flash to read-array mode.
+///
+/// The firmware's bus-write op is `0x19`: `[19, addr_lo, addr_mid, addr_hi,
+/// val_lo, val_hi]`, so writing `0x00FF` to address 0 issues the flash's
+/// read-array command. This cartridge is Intel/Sharp command set (`60`+`D0`
+/// unlock, `70` status, `50` clear, `FF` read array — see
+/// `docs/firmware_re_rom_write.md`), so `0xFF` is the reset and not the
+/// AMD-style `0xF0`. Confirmed on hardware: after putting the flash in status
+/// mode, `0xF0` left it there and only `0xFF` brought the reads back.
+///
+/// The older form here put `0xAA/0x55/0xF0/0xFF` in the **EP4 command byte**,
+/// which is the pre-capture protocol; this firmware dispatches EP4 on byte 0,
+/// knows none of those ops, and so did nothing at all.
 pub fn reset_jedec(handle: &DeviceHandle<GlobalContext>) {
-    let seq: [(u8, u16); 4] = [(0xAA, 0xAAAA), (0x55, 0x5554), (0xF0, 0xAAAA), (0xFF, 0)];
-    for (cb, a) in &seq {
-        let da = a / 2;
-        let c = [*cb, (da & 0xFF) as u8, ((da >> 8) & 0xFF) as u8, 0x00];
-        let _ = handle.write_bulk(CMD_EP, &c, Duration::from_millis(500));
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let _ = handle.write_bulk(CMD_EP, &[0x19, 0x00, 0x00, 0x00, 0xFF, 0x00], TIMEOUT);
+    std::thread::sleep(Duration::from_millis(20));
+}
+
+/// Put the cartridge flash back into read-array mode.
+///
+/// Opens *and claims* the interface first. The previous version only opened the
+/// device, so the bulk write was rejected and swallowed by `let _ =` — the
+/// button reported success while doing nothing.
+pub fn reset_cartridge() -> Result<()> {
+    let (_device, handle, _desc) = open_and_claim(EZWRITER_VID, EZWRITER_PID)?;
+    reset_jedec(&handle);
+    Ok(())
 }
 
 /// Park the writer so the cartridge can be physically removed.
@@ -1813,7 +1832,7 @@ pub struct RomWriteOptions {
     pub byte_addr: u32,
     /// Inter-chunk delay in ms.
     pub delay_ms: u64,
-    #[allow(dead_code)]
+    /// Skip the erase step: only valid if the target region is already blank.
     pub no_erase: bool,
     pub verify: bool,
     pub init: bool,
@@ -1863,7 +1882,11 @@ fn hex_line(bytes: &[u8]) -> String {
 
 /// Rebase one captured 256 KB body onto `block`. `block == 0` reproduces the
 /// capture exactly; see the CLI's identical helper for the address rules.
-fn rebase_body_block(body: &[&str], block: usize) -> Result<Vec<String>> {
+///
+/// With `skip_erase`, the captured erase step is dropped: the body's `0x20`
+/// (erase setup) and `0xD0` (erase confirm) bus writes are left out, for writing
+/// into a block that is already blank.
+fn rebase_body_block(body: &[&str], block: usize, skip_erase: bool) -> Result<Vec<String>> {
     let reg_off = block as u32 * BURN_REG_STRIDE;
     let byte_off = block as u32 * BURN_BYTE_STRIDE;
 
@@ -1891,6 +1914,10 @@ fn rebase_body_block(body: &[&str], block: usize) -> Result<Vec<String>> {
             b[3] = ((addr >> 17) & 0xFF) as u8;
         } else if b.len() == 6 && b[0] == 0x19 {
             let addr = ((b[3] as u32) << 16) | ((b[2] as u32) << 8) | b[1] as u32;
+            let val = ((b[5] as u32) << 8) | b[4] as u32;
+            if skip_erase && (val == 0x0020 || val == 0x00D0) && addr < BURN_REG_STRIDE {
+                continue;
+            }
             if addr < BURN_REG_STRIDE {
                 let addr = addr + reg_off;
                 b[1] = (addr & 0xFF) as u8;
@@ -1904,7 +1931,7 @@ fn rebase_body_block(body: &[&str], block: usize) -> Result<Vec<String>> {
 }
 
 /// Build the full burn script for `blocks` x 256 KB.
-fn build_burn_script(blocks: usize) -> Result<String> {
+fn build_burn_script(blocks: usize, skip_erase: bool) -> Result<String> {
     let (prologue, body, epilogue) = burn_parts();
     let mut script = String::new();
     let push = |l: &str, script: &mut String| {
@@ -1915,7 +1942,7 @@ fn build_burn_script(blocks: usize) -> Result<String> {
         push(l, &mut script);
     }
     for k in 0..blocks {
-        for l in rebase_body_block(&body, k)? {
+        for l in rebase_body_block(&body, k, skip_erase)? {
             push(&l, &mut script);
         }
     }
@@ -1963,7 +1990,7 @@ pub fn write_rom(data: &[u8], opts: &RomWriteOptions, cb: impl Fn(u64, u64)) -> 
     let mut buf = data.to_vec();
     buf.resize(blocks * BURN_BLOCK, 0x00); // EZClient wrote 0x00 past the ROM
     let total = buf.len() as u64;
-    let script = build_burn_script(blocks)?;
+    let script = build_burn_script(blocks, opts.no_erase)?;
 
     let mut off = 0usize;
     let mut inbuf = vec![0u8; BULK];
@@ -2176,6 +2203,30 @@ mod tests {
         let mut bad = b"PATCH".to_vec();
         bad.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x08, 0x01]);
         assert!(apply_ips(&mut rom, &bad).is_err());
+    }
+
+    /// "Skip erase" must actually drop the captured erase step.
+    #[test]
+    fn skip_erase_drops_the_erase_step() {
+        let (_, body, _) = burn_parts();
+        let erase_count = |v: &Vec<String>| {
+            v.iter()
+                .filter(|l| l.starts_with("C 19") && (l.ends_with("2000") || l.ends_with("d000")))
+                .count()
+        };
+        let full = rebase_body_block(&body, 0, false).unwrap();
+        let skipped = rebase_body_block(&body, 0, true).unwrap();
+        assert_eq!(
+            erase_count(&full),
+            8,
+            "captured body erases 4 bank registers twice (setup + confirm)"
+        );
+        assert_eq!(
+            erase_count(&skipped),
+            0,
+            "skip_erase leaves no erase writes"
+        );
+        assert_eq!(full.len() - skipped.len(), 8);
     }
 
     #[test]
