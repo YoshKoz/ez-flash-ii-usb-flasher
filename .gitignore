@@ -18,3 +18,6 @@ deps/
 .claude/
 
 banners/
+
+# Goomba loader is copied from the EZ Client install, not vendored
+goomba.gba

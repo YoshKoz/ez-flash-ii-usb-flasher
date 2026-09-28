@@ -182,6 +182,88 @@ pub fn detect_saver_from_rom(rom: &[u8]) -> Option<&'static str> {
         .map(|(_, save_type)| *save_type)
 }
 
+/// Compute the GBA header checksum (the byte at 0xBD).
+///
+/// The GBA BIOS checks this before running a cartridge, and the algorithm is
+/// documented in the GBATEK header notes: start at 0, subtract each byte of
+/// `0xA0..=0xBC`, then subtract another 0x19.
+pub fn gba_header_checksum(rom: &[u8]) -> u8 {
+    let mut sum: u8 = 0;
+    for b in &rom[0xA0..=0xBC] {
+        sum = sum.wrapping_sub(*b);
+    }
+    sum.wrapping_sub(0x19)
+}
+
+/// True when `rom` starts with the Nintendo logo the GBA BIOS requires, i.e. it
+/// looks like a GBA image rather than a raw Game Boy ROM.
+pub fn is_gba_image(rom: &[u8]) -> bool {
+    rom.len() > 0xC0 && rom[4..8] == [0x24, 0xFF, 0xAE, 0x51]
+}
+
+/// Read the title out of a Game Boy / Game Boy Color cartridge header.
+///
+/// GB titles live at `0x134..=0x143` (16 bytes, NUL padded); GBC games may use
+/// the whole field, older ones stop at the first NUL.
+pub fn gb_rom_title(gb: &[u8]) -> String {
+    if gb.len() < 0x144 {
+        return String::new();
+    }
+    let raw = &gb[0x134..0x144];
+    let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+    raw[..end]
+        .iter()
+        .filter(|b| (0x20..0x7F).contains(*b))
+        .map(|b| *b as char)
+        .collect()
+}
+
+/// Wrap a Game Boy / Game Boy Color ROM so it runs on a GBA under Goomba.
+///
+/// Goomba and Goomba Color both use the same container: **the raw GB ROM is
+/// concatenated to the end of the emulator ROM**, and the combined image is what
+/// gets flashed. That is the whole format — see
+/// <https://lakora.us/gba/goomba/> ("raw Game Boy ROMs are concatenated to the
+/// end of the emulator ROM, and this combined image can then be run on a GBA").
+///
+/// Following FluBBa/Dwedit's `goombafront.exe` — which carries the symbols
+/// `loader`, `oldheader`, `newheader` and `Title` — the GBA header's title is
+/// replaced with the GB game's title and the header checksum is recomputed, so
+/// the cartridge identifies itself as the game rather than "GOOMBAGOOMBA".
+/// Goomba itself never reads that field; it is for the console menu and for us.
+///
+/// Returns the image to write, which is `loader.len() + gb.len()` bytes.
+pub fn wrap_gb_rom(loader: &[u8], gb: &[u8]) -> Result<Vec<u8>> {
+    if !is_gba_image(loader) {
+        bail!("loader does not look like a GBA image (no Nintendo logo at 0x04)");
+    }
+    if gb.len() < 0x150 {
+        bail!(
+            "not a Game Boy ROM: {} bytes is shorter than a header",
+            gb.len()
+        );
+    }
+    if gb[0x104..0x108] != [0xCE, 0xED, 0x66, 0x66] {
+        bail!("not a Game Boy ROM: no Nintendo logo at 0x104");
+    }
+
+    let mut out = Vec::with_capacity(loader.len() + gb.len());
+    out.extend_from_slice(loader);
+
+    // Replace the 12-byte GBA title with the GB game's title, space padded.
+    let title = gb_rom_title(gb);
+    let mut padded = [b' '; 12];
+    for (slot, ch) in padded.iter_mut().zip(title.bytes()) {
+        *slot = ch;
+    }
+    out[0xA0..0xAC].copy_from_slice(&padded);
+    let checksum = gba_header_checksum(&out);
+    out[0xBD] = checksum;
+
+    out.extend_from_slice(gb);
+    Ok(out)
+}
+
 pub struct GameDBEntry {
     pub code: &'static str,
     pub title: &'static str,
@@ -2265,6 +2347,82 @@ mod tests {
             "skip_erase leaves no erase writes"
         );
         assert_eq!(full.len() - skipped.len(), 8);
+    }
+
+    /// A GB ROM header is a 16-byte title at 0x134 and the logo at 0x104.
+    fn fake_gb_rom(title: &[u8]) -> Vec<u8> {
+        let mut gb = vec![0u8; 32 * 1024];
+        gb[0x104..0x108].copy_from_slice(&[0xCE, 0xED, 0x66, 0x66]);
+        gb[0x134..0x134 + title.len()].copy_from_slice(title);
+        gb
+    }
+
+    fn fake_gba_loader() -> Vec<u8> {
+        let mut loader = vec![0u8; 4096];
+        loader[4..8].copy_from_slice(&[0x24, 0xFF, 0xAE, 0x51]);
+        loader[0xA0..0xAC].copy_from_slice(b"GOOMBAGOOMBA");
+        loader[0xAC..0xB0].copy_from_slice(b"GMBA");
+        let sum = gba_header_checksum(&loader);
+        loader[0xBD] = sum;
+        loader
+    }
+
+    /// The documented container, and why the title patch is safe to make.
+    #[test]
+    fn gb_rom_is_appended_to_the_goomba_loader() {
+        let loader = fake_gba_loader();
+        let gb = fake_gb_rom(b"POKEMON YELLOW");
+        let out = wrap_gb_rom(&loader, &gb).unwrap();
+
+        assert_eq!(out.len(), loader.len() + gb.len(), "concatenation only");
+        // The loader is copied verbatim apart from the title field and the
+        // header checksum that the title patch invalidates.
+        for i in 0..loader.len() {
+            if (0xA0..0xAC).contains(&i) || i == 0xBD {
+                continue;
+            }
+            assert_eq!(out[i], loader[i], "loader byte {i:#X} was modified");
+        }
+        assert_eq!(&out[loader.len()..], &gb[..]);
+
+        // Title taken from the GB header, and the header left self-consistent.
+        assert_eq!(&out[0xA0..0xAC], b"POKEMON YELL");
+        assert_eq!(gba_header_checksum(&out), out[0xBD]);
+
+        // Game code must survive: SpecialRomPatch keys its loader fixups on it.
+        assert_eq!(&out[0xAC..0xB0], b"GMBA");
+    }
+
+    #[test]
+    fn header_checksum_matches_a_real_loader() {
+        // The unmodified header of Sysbin\goomba.gba hashes to 0xD0; if this
+        // drifts, the title patch would produce a cartridge the BIOS rejects.
+        let loader = fake_gba_loader();
+        assert_eq!(loader[0xBD], gba_header_checksum(&loader));
+    }
+
+    #[test]
+    fn wrapping_rejects_things_that_are_not_roms() {
+        let loader = fake_gba_loader();
+        let gb = fake_gb_rom(b"X");
+        assert!(
+            wrap_gb_rom(&[0u8; 4096], &gb).is_err(),
+            "loader without logo"
+        );
+        assert!(wrap_gb_rom(&loader, &[0u8; 32]).is_err(), "GB too short");
+        let mut bad = fake_gb_rom(b"X");
+        bad[0x104] = 0;
+        assert!(wrap_gb_rom(&loader, &bad).is_err(), "GB without logo");
+    }
+
+    #[test]
+    fn gb_titles_are_read_and_sanitised() {
+        assert_eq!(
+            gb_rom_title(&fake_gb_rom(b"POKEMON YELLOW")),
+            "POKEMON YELLOW"
+        );
+        assert_eq!(gb_rom_title(&fake_gb_rom(b"TETRIS")), "TETRIS");
+        assert_eq!(gb_rom_title(&[]), "");
     }
 
     /// The markers sit megabytes into real ROMs, so exercise it at depth.

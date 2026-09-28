@@ -111,6 +111,9 @@ pub struct EzWriterApp {
     rom_save_type: Option<&'static str>,
     /// Tracks the maximise state so the title bar can show Maximise or Restore.
     maximized: bool,
+    /// Set when the selected file was a GB/GBC ROM wrapped with Goomba, holding
+    /// a short description of the wrap. `None` for a plain GBA ROM.
+    wrapped_from: Option<String>,
     progress: String,
     progress_value: f32,
     /// Read every ROM chunk twice and require agreement. Catches the stale-EP2
@@ -138,6 +141,7 @@ impl Default for EzWriterApp {
             write_rom_path: PathBuf::new(),
             rom_save_type: None,
             maximized: false,
+            wrapped_from: None,
             write_rom_addr: "0x000000".into(),
             write_rom_delay_ms: 50,
             write_rom_no_erase: false,
@@ -401,11 +405,93 @@ impl EzWriterApp {
     /// Record a chosen ROM file and detect the save library it was built for.
     /// The markers sit megabytes in, so this is a full read; doing it here keeps
     /// the burn itself uninterrupted.
+    /// Locate the Goomba loader shipped with the tooling.
+    ///
+    /// Checked beside the executable, in the working directory, and in
+    /// `firmware`; the original client's `Sysbin\goomba.gba` is accepted last so
+    /// an existing EZ Client install works as-is.
+    fn find_goomba_loader() -> Option<PathBuf> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            candidates.push(dir.join("goomba.gba"));
+        }
+        candidates.push(PathBuf::from("goomba.gba"));
+        candidates.push(PathBuf::from("firmware/goomba.gba"));
+        candidates.push(PathBuf::from(
+            "C:\\Users\\yoshi\\AppData\\Local\\Temp\\opencode\\ezclient_dl\\innosetup\\EZ Client\\Sysbin\\goomba.gba",
+        ));
+        candidates.into_iter().find(|p| p.is_file())
+    }
+
+    /// Record a chosen ROM file and detect the save library it was built for.
+    ///
+    /// A Game Boy / Game Boy Color ROM cannot be flashed as-is: a GBA cannot
+    /// execute it. It is wrapped with the Goomba emulator instead (see
+    /// `device::wrap_gb_rom`) and the wrapped image becomes the write source.
     fn set_rom(&mut self, path: PathBuf) {
-        self.rom_save_type = std::fs::read(&path)
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+
+        self.wrapped_from = None;
+        let source = if ext == "gb" || ext == "gbc" {
+            self.wrap_game_boy_rom(&path, &ext).unwrap_or(path)
+        } else {
+            path
+        };
+
+        self.rom_save_type = std::fs::read(&source)
             .ok()
             .and_then(|data| device::detect_saver_from_rom(&data));
-        self.write_rom_path = path;
+        self.write_rom_path = source;
+    }
+
+    /// Wrap a GB/GBC ROM with Goomba so it can be written to the cartridge.
+    /// Returns the wrapped image path on success.
+    fn wrap_game_boy_rom(&mut self, path: &std::path::Path, ext: &str) -> Option<PathBuf> {
+        let Some(loader_path) = Self::find_goomba_loader() else {
+            self.log_push(
+                "Game Boy ROM selected but goomba.gba was not found. Put it beside the \
+                 executable or in firmware/ — writing the raw ROM would not run.",
+            );
+            return None;
+        };
+        let (Ok(loader), Ok(gb)) = (std::fs::read(&loader_path), std::fs::read(path)) else {
+            self.log_push("Could not read the ROM or the Goomba loader");
+            return None;
+        };
+        let wrapped = match device::wrap_gb_rom(&loader, &gb) {
+            Ok(w) => w,
+            Err(e) => {
+                self.log_push(&format!("Goomba wrap failed: {e}"));
+                return None;
+            }
+        };
+        // Write beside the source ROM rather than %TEMP%: the process can be
+        // denied access outside its own tree (os error 5), and a path next to
+        // the file the user picked is easier to find anyway.
+        let out = path.with_extension("goomba.gba");
+        if let Err(e) = std::fs::write(&out, &wrapped) {
+            self.log_push(&format!("Could not write the wrapped image: {e}"));
+            return None;
+        }
+        let title = device::gb_rom_title(&gb);
+        self.wrapped_from = Some(format!(
+            "{title} [{}] — Goomba {} + ROM {} bytes",
+            ext.to_uppercase(),
+            loader.len(),
+            gb.len()
+        ));
+        self.log_push(&format!(
+            "Wrapped {} ROM '{title}' with {} -> {} bytes",
+            ext.to_uppercase(),
+            loader_path.display(),
+            wrapped.len()
+        ));
+        Some(out)
     }
 
     /// The app's own Fluent title bar. The OS frame is disabled, so this both
@@ -978,6 +1064,12 @@ impl EzWriterApp {
                 .map(|m| m.len())
                 .unwrap_or(0);
             ui.label(format!("File size: {size} bytes ({} KB)", size / 1024));
+            if let Some(w) = &self.wrapped_from {
+                ui.colored_label(
+                    theme::ACCENT,
+                    format!("Game Boy ROM wrapped with Goomba: {w}"),
+                );
+            }
             match self.rom_save_type {
                 Some(t) => {
                     ui.label(format!(
