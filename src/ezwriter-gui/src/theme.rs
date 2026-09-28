@@ -40,6 +40,11 @@ pub mod icons {
     pub const WARNING: &str = "\u{E7BA}";
     /// Eject.
     pub const EJECT: &str = "\u{E7B4}";
+    /// Window controls.
+    pub const MINIMIZE: &str = "\u{E921}";
+    pub const MAXIMIZE: &str = "\u{E922}";
+    pub const RESTORE: &str = "\u{E923}";
+    pub const CLOSE: &str = "\u{E8BB}";
 }
 
 // Fluent dark palette.
@@ -192,6 +197,77 @@ pub fn icon_text(glyph: &str, text: &str) -> egui::WidgetText {
     job.into()
 }
 
+/// A WinUI-style card: a rounded surface with a hairline border and padding,
+/// used to group a section's controls the way Settings cards do.
+pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::NONE
+        .fill(CARD)
+        .stroke(egui::Stroke::new(1.0, STROKE))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// Fluent page title, for the top of a section.
+pub fn page_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(20.0).strong());
+}
+
+/// A Fluent window-control button (the title bar's minimise/maximise/close).
+pub fn window_button(ui: &mut egui::Ui, glyph: &str, name: &str, is_close: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(46.0, 32.0), egui::Sense::click());
+    let hovered = response.hovered();
+    let painter = ui.painter().clone();
+
+    if hovered {
+        let fill = if is_close {
+            egui::Color32::from_rgb(0xC4, 0x2B, 0x1C)
+        } else {
+            CONTROL_HOVER
+        };
+        painter.rect_filled(rect, egui::CornerRadius::ZERO, fill);
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        icon_font(11.0),
+        if hovered && is_close {
+            egui::Color32::WHITE
+        } else {
+            TEXT
+        },
+    );
+
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
+    response.on_hover_text(name)
+}
+
+/// Adds `Ui::icon_button`, a button whose face is a Fluent glyph plus a caption.
+pub trait IconButtonExt {
+    /// Draw a glyph + caption button.
+    fn icon_button(&mut self, glyph: &str, text: &str) -> egui::Response;
+}
+
+impl IconButtonExt for egui::Ui {
+    fn icon_button(&mut self, glyph: &str, text: &str) -> egui::Response {
+        let response = self.button(icon_text(glyph, text));
+        // The glyph lives in a private-use area, so leaving it in the accessible
+        // name makes a screen reader announce nonsense. Publish the caption.
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, self.is_enabled(), text)
+        });
+        response
+    }
+}
 /// An EZClient-style toolbar button: a large glyph with a caption underneath,
 /// which is how the original's toolbar reads, with a Fluent hover state.
 pub fn tool_button(ui: &mut egui::Ui, glyph: &str, caption: &str, tooltip: &str) -> egui::Response {

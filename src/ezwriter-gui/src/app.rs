@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use crate::device;
-use crate::theme;
+use crate::theme::{self, IconButtonExt};
 
 /// Decode Nintendo 156-byte logo bitmap into 24x52 pixel array
 /// Format: column-major, 3 bytes per column (24 rows = 3*8), 52 columns
@@ -109,6 +109,8 @@ pub struct EzWriterApp {
     /// marker. Shown on the Burn tab and used as a fallback by the save tabs
     /// when the cartridge's game code is not in the built-in database.
     rom_save_type: Option<&'static str>,
+    /// Tracks the maximise state so the title bar can show Maximise or Restore.
+    maximized: bool,
     progress: String,
     progress_value: f32,
     /// Read every ROM chunk twice and require agreement. Catches the stale-EP2
@@ -135,6 +137,7 @@ impl Default for EzWriterApp {
             save_path: PathBuf::new(),
             write_rom_path: PathBuf::new(),
             rom_save_type: None,
+            maximized: false,
             write_rom_addr: "0x000000".into(),
             write_rom_delay_ms: 50,
             write_rom_no_erase: false,
@@ -153,6 +156,9 @@ impl Default for EzWriterApp {
 
 impl eframe::App for EzWriterApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // The root ui spans the viewport, so capture it before the panels below
+        // start carving pieces off it. egui 0.36 has no Context::screen_rect.
+        let screen = ui.max_rect();
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 BgCmd::Status(s) => {
@@ -269,6 +275,8 @@ impl eframe::App for EzWriterApp {
             }
         }
 
+        self.show_title_bar(ui);
+
         egui::Panel::top("menu").show(ui, |ui| {
             self.show_toolbar(ui);
         });
@@ -349,17 +357,22 @@ impl eframe::App for EzWriterApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.vertical(|ui| match self.tab {
-                            AppTab::Status => self.show_status(ui),
-                            AppTab::CartInfo => self.show_cart_info(ui),
-                            AppTab::ReadRom => self.show_read_rom(ui),
-                            AppTab::WriteRom => self.show_write_rom(ui),
-                            AppTab::ReadSave => self.show_read_save(ui),
-                            AppTab::WriteSave => self.show_write_save(ui),
+                        ui.vertical(|ui| {
+                            theme::card(ui, |ui| match self.tab {
+                                AppTab::Status => self.show_status(ui),
+                                AppTab::CartInfo => self.show_cart_info(ui),
+                                AppTab::ReadRom => self.show_read_rom(ui),
+                                AppTab::WriteRom => self.show_write_rom(ui),
+                                AppTab::ReadSave => self.show_read_save(ui),
+                                AppTab::WriteSave => self.show_write_save(ui),
+                            });
                         });
                     });
             });
         });
+
+        // Last, so the thin edge bands win interaction over the panels.
+        Self::resize_edges(ui, screen);
     }
 }
 
@@ -393,6 +406,147 @@ impl EzWriterApp {
             .ok()
             .and_then(|data| device::detect_saver_from_rom(&data));
         self.write_rom_path = path;
+    }
+
+    /// The app's own Fluent title bar. The OS frame is disabled, so this both
+    /// draws the chrome and provides the behaviour a frame would have: dragging
+    /// to move, double-click to maximise, and the three window controls.
+    fn show_title_bar(&mut self, ui: &mut egui::Ui) {
+        let bar_height = 32.0;
+        let inner = egui::Panel::top("titlebar")
+            .frame(egui::Frame::NONE.fill(theme::LAYER))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_height(bar_height);
+                    ui.add_space(10.0);
+                    let (icon_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(16.0, bar_height), egui::Sense::hover());
+                    ui.painter().text(
+                        icon_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        theme::icons::CHIP,
+                        theme::icon_font(14.0),
+                        theme::ACCENT,
+                    );
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("EZ-Flash II USB Flasher").size(12.5));
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::window_button(ui, theme::icons::CLOSE, "Close", true).clicked() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let glyph = if self.maximized {
+                            theme::icons::RESTORE
+                        } else {
+                            theme::icons::MAXIMIZE
+                        };
+                        let name = if self.maximized {
+                            "Restore"
+                        } else {
+                            "Maximise"
+                        };
+                        if theme::window_button(ui, glyph, name, false).clicked() {
+                            self.maximized = !self.maximized;
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(
+                                self.maximized,
+                            ));
+                        }
+                        if theme::window_button(ui, theme::icons::MINIMIZE, "Minimise", false)
+                            .clicked()
+                        {
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                    });
+                });
+            });
+
+        // Drag anywhere on the bar except over the window controls.
+        let r = inner.response.rect;
+        let drag_rect = egui::Rect::from_min_max(r.min, egui::pos2(r.right() - 150.0, r.bottom()));
+        let resp = ui.interact(
+            drag_rect,
+            egui::Id::new("titlebar_drag"),
+            egui::Sense::click_and_drag(),
+        );
+        if resp.dragged() {
+            // ViewportCommand::StartDrag does not move this undecorated window on
+            // Windows (BeginResize works, StartDrag does not), so move it by
+            // applying the pointer delta to the outer position directly.
+            let delta = ui.ctx().input(|i| i.pointer.delta());
+            if delta != egui::Vec2::ZERO
+                && let Some(outer) = ui.ctx().input(|i| i.viewport().outer_rect)
+            {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::OuterPosition(outer.min + delta));
+            }
+        }
+        if resp.double_clicked() {
+            self.maximized = !self.maximized;
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Maximized(self.maximized));
+        }
+    }
+
+    /// Hit-test the window edges and hand them to the backend.
+    ///
+    /// With `with_decorations(false)` the OS draws no resize borders, so without
+    /// this the window could be moved but never resized. Called last so the thin
+    /// edge bands sit above the panel backgrounds.
+    fn resize_edges(ui: &egui::Ui, s: egui::Rect) {
+        use egui::viewport::ResizeDirection as Dir;
+        let b = 6.0;
+        let edges: [(egui::Rect, Dir); 8] = [
+            (
+                egui::Rect::from_min_max(s.min, egui::pos2(s.max.x, s.min.y + b)),
+                Dir::North,
+            ),
+            (
+                egui::Rect::from_min_max(egui::pos2(s.min.x, s.max.y - b), s.max),
+                Dir::South,
+            ),
+            (
+                egui::Rect::from_min_max(s.min, egui::pos2(s.min.x + b, s.max.y)),
+                Dir::West,
+            ),
+            (
+                egui::Rect::from_min_max(egui::pos2(s.max.x - b, s.min.y), s.max),
+                Dir::East,
+            ),
+            (
+                egui::Rect::from_min_max(s.min, s.min + egui::vec2(b, b)),
+                Dir::NorthWest,
+            ),
+            (
+                egui::Rect::from_min_max(
+                    egui::pos2(s.max.x - b, s.min.y),
+                    egui::pos2(s.max.x, s.min.y + b),
+                ),
+                Dir::NorthEast,
+            ),
+            (
+                egui::Rect::from_min_max(
+                    egui::pos2(s.min.x, s.max.y - b),
+                    egui::pos2(s.min.x + b, s.max.y),
+                ),
+                Dir::SouthWest,
+            ),
+            (
+                egui::Rect::from_min_max(s.max - egui::vec2(b, b), s.max),
+                Dir::SouthEast,
+            ),
+        ];
+        for (rect, dir) in edges {
+            let resp = ui.interact(
+                rect,
+                egui::Id::new(("resize", dir as u8)),
+                egui::Sense::drag(),
+            );
+            if resp.drag_started() {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+            }
+        }
     }
 
     /// Ask for a ROM file, then record it.
@@ -552,24 +706,21 @@ impl EzWriterApp {
     }
 
     fn show_status(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Device Status");
+        theme::page_title(ui, "Device Status");
         ui.separator();
         ui.label(&self.status_text);
         if ui
-            .button(theme::icon_text(theme::icons::SEARCH, "Detect Device"))
+            .icon_button(theme::icons::SEARCH, "Detect Device")
             .clicked()
         {
             self.progress.clear();
             self.detect(self.tx.clone());
         }
         ui.separator();
-        ui.heading("Initialize (load firmware)");
+        theme::page_title(ui, "Initialize (load firmware)");
         ui.label("Plug in device in bootloader mode, then click below:");
         if ui
-            .button(theme::icon_text(
-                theme::icons::WARNING,
-                "Initialize AN2131 (load firmware)",
-            ))
+            .icon_button(theme::icons::WARNING, "Initialize AN2131 (load firmware)")
             .clicked()
         {
             if let Some((t1, t2)) = Self::locate_loaders() {
@@ -605,10 +756,7 @@ impl EzWriterApp {
             }
         }
         if ui
-            .button(theme::icon_text(
-                theme::icons::REFRESH,
-                "Reset Cartridge Flash",
-            ))
+            .icon_button(theme::icons::REFRESH, "Reset Cartridge Flash")
             .clicked()
         {
             let tx = self.tx.clone();
@@ -622,13 +770,10 @@ impl EzWriterApp {
             });
         }
         ui.separator();
-        ui.heading("Eject");
+        theme::page_title(ui, "Eject");
         ui.label("Ends the cartridge session and parks the flash so the cartridge can be removed safely:");
         if ui
-            .button(theme::icon_text(
-                theme::icons::EJECT,
-                "Eject Cartridge Safely",
-            ))
+            .icon_button(theme::icons::EJECT, "Eject Cartridge Safely")
             .clicked()
         {
             let tx = self.tx.clone();
@@ -652,12 +797,9 @@ impl EzWriterApp {
     }
 
     fn show_cart_info(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Cartridge Information");
+        theme::page_title(ui, "Cartridge Information");
         if ui
-            .button(theme::icon_text(
-                theme::icons::CARTRIDGE,
-                "Detect Cartridge",
-            ))
+            .icon_button(theme::icons::CARTRIDGE, "Detect Cartridge")
             .clicked()
         {
             let tx = self.tx.clone();
@@ -735,10 +877,10 @@ impl EzWriterApp {
     }
 
     fn show_read_rom(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Read ROM to File");
+        theme::page_title(ui, "Read ROM to File");
         ui.horizontal_wrapped(|ui| {
             if ui
-                .button(theme::icon_text(theme::icons::OPEN_FILE, "Select File..."))
+                .icon_button(theme::icons::OPEN_FILE, "Select File...")
                 .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Save GBA ROM As")
@@ -809,7 +951,7 @@ impl EzWriterApp {
     }
 
     fn show_write_rom(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Write ROM to Cartridge (Burn)");
+        theme::page_title(ui, "Write ROM to Cartridge (Burn)");
         ui.colored_label(
             theme::DANGER,
             "[!]  DESTRUCTIVE — this ERASES and rewrites cartridge flash. Back it up first.",
@@ -818,10 +960,7 @@ impl EzWriterApp {
 
         ui.horizontal_wrapped(|ui| {
             if ui
-                .button(theme::icon_text(
-                    theme::icons::OPEN_FILE,
-                    "Select ROM File...",
-                ))
+                .icon_button(theme::icons::OPEN_FILE, "Select ROM File...")
                 .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Open GBA ROM")
@@ -876,10 +1015,7 @@ impl EzWriterApp {
                 "Trim ROM (strip trailing 0xFF/0x00 padding before writing)",
             );
             if ui
-                .button(theme::icon_text(
-                    theme::icons::OPEN_FILE,
-                    "Select IPS Patch...",
-                ))
+                .icon_button(theme::icons::OPEN_FILE, "Select IPS Patch...")
                 .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Open IPS Patch")
@@ -906,7 +1042,7 @@ impl EzWriterApp {
         } else if addr.is_none() {
             ui.colored_label(theme::DANGER, "Start address must be hex, e.g. 0x000000.");
         } else if ui
-            .button(theme::icon_text(theme::icons::FLASH, "ERASE + WRITE ROM"))
+            .icon_button(theme::icons::FLASH, "ERASE + WRITE ROM")
             .clicked()
         {
             let path = self.write_rom_path.clone();
@@ -991,7 +1127,7 @@ impl EzWriterApp {
     }
 
     fn show_read_save(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Read Save to File");
+        theme::page_title(ui, "Read Save to File");
         if let Some(ref hdr) = self.cart_header {
             let sz = device::save_size_bytes(&hdr.save_type);
             if device::is_known_save_type(&hdr.save_type) {
@@ -1015,7 +1151,7 @@ impl EzWriterApp {
         }
         ui.horizontal_wrapped(|ui| {
             if ui
-                .button(theme::icon_text(theme::icons::OPEN_FILE, "Select File..."))
+                .icon_button(theme::icons::OPEN_FILE, "Select File...")
                 .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Save Save As")
@@ -1027,9 +1163,7 @@ impl EzWriterApp {
             ui.label(self.save_path.display().to_string());
         });
         if !self.save_path.as_os_str().is_empty()
-            && ui
-                .button(theme::icon_text(theme::icons::SAVE, "Dump Save"))
-                .clicked()
+            && ui.icon_button(theme::icons::SAVE, "Dump Save").clicked()
         {
             let path = self.save_path.clone();
             let tx = self.tx.clone();
@@ -1120,7 +1254,7 @@ impl EzWriterApp {
     }
 
     fn show_write_save(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Write Save to Cartridge");
+        theme::page_title(ui, "Write Save to Cartridge");
         ui.colored_label(theme::DANGER, "[!]  WRITE OPERATION — USE WITH CAUTION");
         ui.separator();
         if let Some(ref hdr) = self.cart_header {
@@ -1141,10 +1275,7 @@ impl EzWriterApp {
         }
         ui.horizontal_wrapped(|ui| {
             if ui
-                .button(theme::icon_text(
-                    theme::icons::OPEN_FILE,
-                    "Select Save File...",
-                ))
+                .icon_button(theme::icons::OPEN_FILE, "Select Save File...")
                 .clicked()
                 && let Some(path) = FileDialog::new()
                     .set_title("Open Save File")
@@ -1159,10 +1290,7 @@ impl EzWriterApp {
         if !self.save_path.as_os_str().is_empty() && self.cart_header.is_some() {
             ui.separator();
             if ui
-                .button(theme::icon_text(
-                    theme::icons::UPLOAD,
-                    "Write Save to Cartridge",
-                ))
+                .icon_button(theme::icons::UPLOAD, "Write Save to Cartridge")
                 .clicked()
             {
                 let path = self.save_path.clone();
