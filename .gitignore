@@ -6,6 +6,7 @@ target/
 *.ihx
 *.sav
 *.gba
+!firmware/*.gba
 *.partial
 # Root-anchored: a bare "captures/" also swallowed docs/captures/, which holds
 # committed reverse-engineering evidence (the EZClient traces and the patchDLL
@@ -19,5 +20,6 @@ deps/
 
 banners/
 
-# Goomba loader is copied from the EZ Client install, not vendored
-goomba.gba
+# Goomba loader lives in firmware/ (see docs/gb_gbc_support.md); only ignore
+# stray copies at the repo root.
+/goomba.gba

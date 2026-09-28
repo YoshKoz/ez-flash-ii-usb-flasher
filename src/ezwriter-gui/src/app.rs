@@ -416,12 +416,11 @@ impl EzWriterApp {
             && let Some(dir) = exe.parent()
         {
             candidates.push(dir.join("goomba.gba"));
+            candidates.push(dir.join("firmware/goomba.gba"));
         }
         candidates.push(PathBuf::from("goomba.gba"));
         candidates.push(PathBuf::from("firmware/goomba.gba"));
-        candidates.push(PathBuf::from(
-            "C:\\Users\\yoshi\\AppData\\Local\\Temp\\opencode\\ezclient_dl\\innosetup\\EZ Client\\Sysbin\\goomba.gba",
-        ));
+
         candidates.into_iter().find(|p| p.is_file())
     }
 
