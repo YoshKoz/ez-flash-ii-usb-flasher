@@ -1,0 +1,50 @@
+# CRomManager::SpecialRomPatch (patchDLL.dll, ImageBase 0x10000000)
+# RVA 0x3D70..0x40F0. Makes no calls: it compares the GBA title field at
+# rom+0xA0 against a marker string, then writes fixed bytes at fixed ROM
+# offsets. Stores are listed in address order; markers are marked where
+# the code loads them so each block can be tied to its game.
+#
+# Immediates are decoded from the raw instruction bytes, NOT taken from the
+# disassembler text: dumpbin renders the dword at 0x10003E51 as
+# '0F8428009h' when the bytes are 09 80 42 F8, i.e. 0xF8428009.
+
+=== marker strings referenced ===
+  10003D91  loads 100112C8  'SONICPINBALL'
+  10003E64  loads 100112C0  'BOKUTAI'
+  10003FE0  loads 100112B8  'GMBA'
+  1000401E  loads 100112B0  'PCEA'
+  10004058  loads 100112AC  'FCA'
+  10004092  loads 100112A4  'PNES'
+
+=== fixed stores (decoded from raw bytes) ===
+  insn       width  offset       value        nearest marker before it
+  10003E35  dword  0xDE264      0xB4280EF    SONICPINBALL
+  10003E51  dword  0xDE458      0xF8428009   SONICPINBALL
+  10003EA9  byte   0x1C336C     0xE4         BOKUTAI
+  10003EB2  byte   0x1C336D     0xF0         BOKUTAI
+  10003EBB  byte   0x1C336E     0xEE         BOKUTAI
+  10003EC4  byte   0xEEF0E4     0xA8         BOKUTAI
+  10003ECD  byte   0xEEF0E5     0x0          BOKUTAI
+  10003ED8  byte   0xEEF0E6     0x9F         BOKUTAI
+  10003EE9  byte   0xEEF0E8     0x0          BOKUTAI
+  10003EF2  byte   0xEEF0E9     0xE0         BOKUTAI
+  10003EFB  byte   0xEEF0EA     0xA0         BOKUTAI
+  10003F0E  byte   0xEEF0EC     0xA8         BOKUTAI
+  10003F17  byte   0xEEF0ED     0x0          BOKUTAI
+  10003F20  byte   0xEEF0EE     0x9F         BOKUTAI
+  10003F31  byte   0xEEF0F0     0x10         BOKUTAI
+  10003F3A  byte   0xEEF0F1     0xFF         BOKUTAI
+  10003F43  byte   0xEEF0F2     0x2F         BOKUTAI
+  10003F54  byte   0xEEF194     0xD0         BOKUTAI
+  10003F5D  byte   0xEEF195     0x0          BOKUTAI
+  10003F66  byte   0xEEF196     0x0          BOKUTAI
+  10003F79  byte   0xEEF198     0x0          BOKUTAI
+  10003F82  byte   0xEEF199     0x0          BOKUTAI
+  10003F8B  byte   0xEEF19A     0x0          BOKUTAI
+  10003F94  byte   0xEEF19B     0x0          BOKUTAI
+  10003F9D  byte   0xEEF19C     0xE9         BOKUTAI
+  10003FA6  byte   0xEEF19D     0x33         BOKUTAI
+  10003FAF  byte   0xEEF19E     0x1C         BOKUTAI
+  100040D4  dword  0xDCC        0x2000004    PNES
+
+total fixed stores: 28, marker blocks: 6, immediates the disassembler misrendered: 0

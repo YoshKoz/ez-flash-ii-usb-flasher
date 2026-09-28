@@ -7,11 +7,14 @@ target/
 *.sav
 *.gba
 *.partial
-captures/
+# Root-anchored: a bare "captures/" also swallowed docs/captures/, which holds
+# committed reverse-engineering evidence (the EZClient traces and the patchDLL
+# motif / patch tables).
+/captures/
 original/
 original_backup/
 deps/
-captures/*.pcap
+/captures/*.pcap
 .claude/
 
 banners/
