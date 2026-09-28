@@ -182,6 +182,23 @@ pub fn detect_saver_from_rom(rom: &[u8]) -> Option<&'static str> {
         .map(|(_, save_type)| *save_type)
 }
 
+/// The 48-byte Nintendo logo every Game Boy cartridge carries at `0x104`.
+///
+/// The 4-byte prefix alone is not enough to identify a GB ROM: the Goomba
+/// loader itself contains `CE ED 66 66` at `0xc14`, which a prefix scan reads as
+/// a candidate ROM starting at `0xb10`. The full logo is absent from the loader,
+/// so checking all 48 bytes is unambiguous.
+pub const GB_LOGO: [u8; 48] = [
+    0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
+    0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
+    0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
+];
+
+/// True when `gb` carries a full Game Boy cartridge header logo.
+pub fn is_gb_rom(gb: &[u8]) -> bool {
+    gb.len() >= 0x150 && gb[0x104..0x134] == GB_LOGO
+}
+
 /// Compute the GBA header checksum (the byte at 0xBD).
 ///
 /// The GBA BIOS checks this before running a cartridge, and the algorithm is
@@ -243,7 +260,7 @@ pub fn wrap_gb_rom(loader: &[u8], gb: &[u8]) -> Result<Vec<u8>> {
             gb.len()
         );
     }
-    if gb[0x104..0x108] != [0xCE, 0xED, 0x66, 0x66] {
+    if !is_gb_rom(gb) {
         bail!("not a Game Boy ROM: no Nintendo logo at 0x104");
     }
 
@@ -2349,10 +2366,37 @@ mod tests {
         assert_eq!(full.len() - skipped.len(), 8);
     }
 
+    /// The payload must be discoverable the way the reference tools find it.
+    ///
+    /// goombasav's `gbaromextract` pulls GB ROMs out of a compiled Goomba image
+    /// "or any other uncompressed archive file (Game Boy ROMs have a standard
+    /// header format that makes this possible)" — i.e. Goomba *scans* for GB
+    /// headers rather than using a fixed offset or an alignment. So there is no
+    /// offset field to get wrong, and this checks the appended ROM is exactly
+    /// where such a scan would find it.
+    #[test]
+    fn the_appended_rom_is_findable_by_scanning() {
+        let loader = fake_gba_loader();
+        let gb = fake_gb_rom(b"POKEMON YELLOW");
+        let out = wrap_gb_rom(&loader, &gb).unwrap();
+
+        let mut found = Vec::new();
+        for i in 0..out.len().saturating_sub(0x134) {
+            if out[i + 0x104..i + 0x134] == GB_LOGO {
+                found.push(i);
+            }
+        }
+        assert_eq!(
+            found,
+            vec![loader.len()],
+            "a GB-header scan should find only the ROM we appended, at the end of the loader"
+        );
+    }
+
     /// A GB ROM header is a 16-byte title at 0x134 and the logo at 0x104.
     fn fake_gb_rom(title: &[u8]) -> Vec<u8> {
         let mut gb = vec![0u8; 32 * 1024];
-        gb[0x104..0x108].copy_from_slice(&[0xCE, 0xED, 0x66, 0x66]);
+        gb[0x104..0x134].copy_from_slice(&GB_LOGO);
         gb[0x134..0x134 + title.len()].copy_from_slice(title);
         gb
     }
@@ -2411,7 +2455,7 @@ mod tests {
         );
         assert!(wrap_gb_rom(&loader, &[0u8; 32]).is_err(), "GB too short");
         let mut bad = fake_gb_rom(b"X");
-        bad[0x104] = 0;
+        bad[0x104..0x134].fill(0);
         assert!(wrap_gb_rom(&loader, &bad).is_err(), "GB without logo");
     }
 

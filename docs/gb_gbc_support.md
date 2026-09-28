@@ -36,6 +36,29 @@ Header checksum, per the GBATEK header notes: start at 0, subtract every byte of
 `0xA0..=0xBC`, then subtract a further `0x19`. Verified against the unmodified
 loader, whose stored checksum is `0xD0`.
 
+## Where the ROM goes, and why nothing needs aligning
+
+The companion tool `gbaromextract` in
+[goombasav](https://github.com/libertyernie/goombasav) extracts Game Boy ROMs
+from a compiled Goomba image, "or any other uncompressed archive file (Game Boy
+ROMs have a standard header format that makes this possible)". Goomba therefore
+**scans for GB headers** — there is no offset field and no alignment to get
+right, which is why plain concatenation is the whole format.
+
+The scan has to check the **full 48-byte** Nintendo logo at `0x104`, not the
+4-byte prefix. The loader itself contains `CE ED 66 66` at `0xc14`, which a
+prefix scan reads as a candidate ROM starting at `0xb10` — a false positive. The
+full logo does not appear in the loader at all, so matching all 48 bytes is
+unambiguous. `device::is_gb_rom` / `GB_LOGO` do this.
+
+Round-trip check on the real images, extracting the way `gbaromextract` does:
+
+```
+full logo inside the loader : none
+yellow.goomba.gba   full-logo scan hits ['0xaa58']  loader 43608  -> one hit, at the end
+crystal.goomba.gba  full-logo scan hits ['0xaa58']  loader 43608  -> one hit, at the end
+extracted == input ROM      True (both)
+```
 ## Using it
 
 The loader ships in `firmware/goomba.gba` (43,608 bytes, taken from the EZ Client
