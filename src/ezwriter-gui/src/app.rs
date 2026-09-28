@@ -100,6 +100,8 @@ pub struct EzWriterApp {
     write_rom_no_erase: bool,
     write_rom_verify: bool,
     write_rom_init: bool,
+    /// Trim trailing 0xFF/0x00 padding before writing.
+    write_rom_trim: bool,
     progress: String,
     progress_value: f32,
     /// Read every ROM chunk twice and require agreement. Catches the stale-EP2
@@ -130,6 +132,7 @@ impl Default for EzWriterApp {
             write_rom_no_erase: false,
             write_rom_verify: true,
             write_rom_init: true,
+            write_rom_trim: false,
             progress: String::new(),
             progress_value: 0.0,
             confirm_chunks: true,
@@ -694,6 +697,10 @@ impl EzWriterApp {
                 "Skip erase (only if the region is already blank)",
             );
             ui.checkbox(&mut self.write_rom_verify, "Verify after writing");
+            ui.checkbox(
+                &mut self.write_rom_trim,
+                "Trim ROM (strip trailing 0xFF/0x00 padding before writing)",
+            );
         });
         ui.separator();
 
@@ -715,6 +722,7 @@ impl EzWriterApp {
                 init: self.write_rom_init,
             };
             let tx = self.tx.clone();
+            let trim = self.write_rom_trim;
             self.progress_value = 0.01;
             thread::spawn(move || {
                 let data = match std::fs::read(&path) {
@@ -724,8 +732,13 @@ impl EzWriterApp {
                         return;
                     }
                 };
+                let data = if trim {
+                    device::trim_rom_padding(&data)
+                } else {
+                    &data[..]
+                };
                 let total = data.len() as u64;
-                match device::write_rom(&data, &opts, |written, tot| {
+                match device::write_rom(data, &opts, |written, tot| {
                     let _ = tx.send(BgCmd::RomWriteProgress {
                         bytes_written: written,
                         total_bytes: tot,

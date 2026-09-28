@@ -1503,6 +1503,22 @@ pub fn fetch_boxart(title: &str, code: &str) -> Result<Banner> {
     decode_png_rgba(&bytes).with_context(|| format!("decoding {}", cached.display()))
 }
 
+/// Strip trailing padding from a ROM dump before writing.
+///
+/// Over-dumped cartridges are usually padded with `0xFF` (erased flash) or
+/// `0x00`. Trimming it means fewer 256 KB blocks to erase and program, which is
+/// most of the write time. The result is rounded back up to a whole block, and
+/// never trimmed below one block, so the caller still gets a valid image.
+pub fn trim_rom_padding(data: &[u8]) -> &[u8] {
+    const BLOCK: usize = 256 * 1024;
+    let mut end = data.len();
+    while end > 0 && (data[end - 1] == 0xFF || data[end - 1] == 0x00) {
+        end -= 1;
+    }
+    let keep = end.div_ceil(BLOCK).max(1) * BLOCK;
+    &data[..keep.min(data.len())]
+}
+
 pub fn dump_to_file(path: &PathBuf, data: &[u8]) -> Result<()> {
     std::fs::write(path, data).with_context(|| format!("Failed to write {}", path.display()))
 }
