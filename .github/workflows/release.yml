@@ -51,14 +51,16 @@ jobs:
           cp target/${{ matrix.target }}/release/ezwriter-gui${{ matrix.suffix }} dist/ezwriter-gui-${{ matrix.target }}${{ matrix.suffix }}
           cp firmware/* dist/
 
-      # winget and Scoop cannot install from loose release assets, so ship one
-      # Windows archive containing the binaries plus the firmware files the app
+      # winget cannot install from loose release assets, so ship one Windows
+      # archive containing the binaries plus the firmware files the app
       # expects beside the executable.
       - name: Package Windows zip
         if: matrix.os == 'windows-latest'
         shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $ver = $env:REF_NAME.TrimStart('v')
           $zip = "ezwriter-$ver-${{ matrix.target }}.zip"
           Compress-Archive -Path dist/* -DestinationPath $zip
           Move-Item $zip dist/
