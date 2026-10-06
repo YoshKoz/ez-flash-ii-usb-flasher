@@ -49,7 +49,19 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/ezwriter-cli${{ matrix.suffix }} dist/ezwriter-cli-${{ matrix.target }}${{ matrix.suffix }}
           cp target/${{ matrix.target }}/release/ezwriter-gui${{ matrix.suffix }} dist/ezwriter-gui-${{ matrix.target }}${{ matrix.suffix }}
-          cp firmware/*.bin dist/
+          cp firmware/* dist/
+
+      # winget and Scoop cannot install from loose release assets, so ship one
+      # Windows archive containing the binaries plus the firmware files the app
+      # expects beside the executable.
+      - name: Package Windows zip
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $zip = "ezwriter-$ver-${{ matrix.target }}.zip"
+          Compress-Archive -Path dist/* -DestinationPath $zip
+          Move-Item $zip dist/
 
       - uses: actions/upload-artifact@v7
         with:
